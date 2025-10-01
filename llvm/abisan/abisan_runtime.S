@@ -49,7 +49,6 @@ __abisan_function_entry:
     mov BYTE PTR [rbx + TAINT_STATE_R14], 0xff
     mov BYTE PTR [rbx + TAINT_STATE_R15], 0xff
     mov BYTE PTR [rbx + TAINT_STATE_RBP], 0xff
-    mov BYTE PTR [rbx + TAINT_STATE_EFLAGS], 0xff
     // Argument registers should be updated after every call, not here
 
     // Check for stack alignment

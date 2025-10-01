@@ -3,12 +3,14 @@
 #include "Target/X86/X86.h"
 #include "Target/X86/X86RegisterInfo.h"
 #include "X86GenInstrInfo.inc"
+#include "abisan_runtime.h"
 #include "llvm/MC/MCAsmBackend.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCAsmStreamer.h"
 #include "llvm/MC/MCCodeEmitter.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCDirectives.h"
+#include "llvm/MC/MCInstBuilder.h"
 #include "llvm/MC/MCInstPrinter.h"
 #include "llvm/MC/MCInstrInfo.h"
 #include "llvm/MC/MCObjectFileInfo.h"
@@ -60,75 +62,59 @@ public:
   }
 };
 
-static std::vector<MCRegister>
-get_written_registers(MCInst const &inst, MCInstrInfo const &MCII,
-                      MCRegisterInfo const &MRI) {
+static std::vector<MCRegister> get_written_registers(MCInst const &inst,
+                                                     MCInstrInfo const &MCII) {
   MCInstrDesc const &instr_desc = MCII.get(inst.getOpcode());
 
   std::vector<MCRegister> result;
-  for (unsigned i = 0; i < MRI.getNumRegs(); i++) {
-    MCRegister const reg = MCRegister::from(i);
-    if (instr_desc.hasDefOfPhysReg(inst, reg, MRI)) {
-      result.push_back(reg);
+  for (unsigned i = 0; i < instr_desc.getNumDefs(); i++) {
+    auto const &op = inst.getOperand(i);
+    if (op.isReg() && op.getReg().isPhysical()) {
+      result.push_back(op.getReg());
     }
   }
-  if (inst.getOpcode() == X86::SYSCALL) {
-    result.push_back(X86::RCX);
-    result.push_back(X86::R11);
-  }
-  return result;
-}
 
-static std::vector<MCRegister> get_used_registers(MCInst const &inst,
-                                                  MCInstrInfo const &MCII) {
-  MCInstrDesc const &instr_desc = MCII.get(inst.getOpcode());
-
-  std::vector<MCRegister> result;
-  for (unsigned i = 0; i < inst.getNumOperands(); i++) {
-    auto const &operand = inst.getOperand(i);
-    if (operand.isReg() && operand.getReg() != 0) {
-      result.push_back(operand.getReg());
-    }
-  }
-  auto const &implicit_uses = instr_desc.implicit_uses();
   auto const &implicit_defs = instr_desc.implicit_defs();
-  result.insert(result.end(), implicit_uses.begin(), implicit_uses.end());
   result.insert(result.end(), implicit_defs.begin(), implicit_defs.end());
   if (inst.getOpcode() == X86::SYSCALL) {
-    result.push_back(X86::RCX); // written
-    result.push_back(X86::R11); // written
-    result.push_back(X86::RAX); // read
+    result.insert(result.end(), {X86::RCX, X86::R11, X86::RAX});
   }
   return result;
 }
 
 static std::vector<MCRegister> get_read_registers(MCInst const &inst,
-                                                  MCInstrInfo const &MCII,
-                                                  MCRegisterInfo const &MRI) {
-  std::vector<MCRegister> result = get_used_registers(inst, MCII);
-  std::vector<MCRegister> written_registers =
-      get_written_registers(inst, MCII, MRI);
-  for (auto const &written_register : written_registers) {
-    auto the_find = std::find(result.begin(), result.end(), written_register);
-    if (the_find != result.end()) {
-      result.erase(the_find);
+                                                  MCInstrInfo const &MCII) {
+  MCInstrDesc const &instr_desc = MCII.get(inst.getOpcode());
+
+  std::vector<MCRegister> result;
+  for (unsigned i = instr_desc.getNumDefs(); i < instr_desc.getNumOperands();
+       i++) {
+    auto const &op = inst.getOperand(i);
+    if (op.isReg() && op.getReg().isPhysical()) {
+      result.push_back(op.getReg());
     }
   }
 
-  std::vector<MCRegister> deduped_result;
-  for (auto const &r1 : result) {
-    bool dup = false;
-    for (auto const &r2 : deduped_result) {
-      if (r1 == r2) {
-        dup = true;
-        break;
-      }
-    }
-    if (!dup) {
-      deduped_result.push_back(r1);
+  auto const &implicit_uses = instr_desc.implicit_uses();
+  result.insert(result.end(), implicit_uses.begin(), implicit_uses.end());
+  if (inst.getOpcode() == X86::SYSCALL) {
+    result.insert(result.end(), {X86::RCX, X86::R11, X86::RAX});
+  }
+  return result;
+}
+
+static std::vector<MCRegister> const TAINT_CHECKED_REGISTERS{
+    X86::RAX, X86::RBX, X86::RCX, X86::RDX,   X86::RDI, X86::RSI,
+    X86::R8,  X86::R9,  X86::R10, X86::R11,   X86::R12, X86::R13,
+    X86::R14, X86::R15, X86::RBP, X86::EFLAGS};
+
+static bool is_taint_checked(MCRegister const &reg, MCRegisterInfo const &MRI) {
+  for (auto const &checked_reg : TAINT_CHECKED_REGISTERS) {
+    if (MRI.isSubRegisterEq(checked_reg, reg)) {
+      return true;
     }
   }
-  return deduped_result;
+  return false;
 }
 
 class ABISanStreamer : public MCAsmStreamer {
@@ -151,39 +137,71 @@ public:
 
   void emitInstruction(MCInst const &inst,
                        MCSubtargetInfo const &STIArg) override {
-    MCAsmStreamer::emitInstruction(inst, STIArg);
-
     MCRegisterInfo const &MRI = *getContext().getRegisterInfo();
 
-    for (auto const &reg : get_written_registers(inst, MCII, MRI)) {
-      emitRawComment(Twine(" Writes: ")
-                         .concat(Twine(MRI.getName(reg)))
-                         .concat(Twine(" ("))
-                         .concat(Twine(std::to_string(reg)))
-                         .concat(Twine(")")),
-                     true);
+    for (auto const &reg : get_read_registers(inst, MCII)) {
+      if (is_taint_checked(reg, MRI)) {
+        emitRawComment(Twine(" Begin taint check for ")
+                           .concat(Twine(MRI.getName(reg)))
+                           .concat(Twine(" ("))
+                           .concat(Twine(std::to_string(reg)))
+                           .concat(Twine(")")),
+                       true);
+
+        std::vector<MCInst> const insts{
+            MCInstBuilder(X86::PUSHF64),
+            MCInstBuilder(X86::PUSH64r).addReg(X86::RBP),
+            MCInstBuilder(X86::MOV64rr).addReg(X86::RBP).addReg(X86::RSP),
+            MCInstBuilder(X86::AND64ri8)
+                .addReg(X86::RSP)
+                .addReg(X86::RSP)
+                .addImm(0xfffffffffffffff0ull),
+            MCInstBuilder(X86::POP64r).addReg(X86::RBP),
+            MCInstBuilder(X86::POPF64)};
+
+        for (auto const &i : insts) {
+          MCAsmStreamer::emitInstruction(i, STIArg);
+        }
+
+        emitRawComment(Twine(" End taint check for ")
+                           .concat(Twine(MRI.getName(reg)))
+                           .concat(Twine(" ("))
+                           .concat(Twine(std::to_string(reg)))
+                           .concat(Twine(")")),
+                       true);
+      }
     }
 
-    for (auto const &reg : get_read_registers(inst, MCII, MRI)) {
-      emitRawComment(Twine(" Reads: ")
-                         .concat(Twine(MRI.getName(reg)))
-                         .concat(Twine(" ("))
-                         .concat(Twine(std::to_string(reg)))
-                         .concat(Twine(")")),
-                     true);
+    for (auto const &reg : get_written_registers(inst, MCII)) {
+      if (is_taint_checked(reg, MRI)) {
+        emitRawComment(Twine(" Begin taint clear for: ")
+                           .concat(Twine(MRI.getName(reg)))
+                           .concat(Twine(" ("))
+                           .concat(Twine(std::to_string(reg)))
+                           .concat(Twine(")")),
+                       true);
+        emitRawComment(Twine(" End taint clear for: ")
+                           .concat(Twine(MRI.getName(reg)))
+                           .concat(Twine(" ("))
+                           .concat(Twine(std::to_string(reg)))
+                           .concat(Twine(")")),
+                       true);
+      }
     }
+
+    MCAsmStreamer::emitInstruction(inst, STIArg);
   }
 
   void emitLabel(MCSymbol *Symbol, SMLoc Loc = SMLoc()) override {
     MCAsmStreamer::emitLabel(Symbol, Loc);
     for (auto const &instrumented_symbol_name : instrumented_symbol_names) {
       if (Symbol->getName().str() == instrumented_symbol_name) {
-        MCInst call;
-        call.setOpcode(X86::CALL64pcrel32);
-        call.addOperand(MCOperand::createExpr(MCSymbolRefExpr::create(
-            getContext().getOrCreateSymbol("__abisan_function_entry"),
-            getContext())));
-        MCAsmStreamer::emitInstruction(call, STI);
+        MCAsmStreamer::emitInstruction(
+            MCInstBuilder(X86::CALL64pcrel32)
+                .addExpr(MCSymbolRefExpr::create(
+                    getContext().getOrCreateSymbol("__abisan_function_entry"),
+                    getContext())),
+            STI);
       }
     }
   }
@@ -204,7 +222,7 @@ static std::unique_ptr<SourceMgr> make_sm(char const *const filename) {
 static std::unique_ptr<MCObjectFileInfo const> make_mofi(MCContext &Ctx) {
   std::unique_ptr<MCObjectFileInfo> MOFI = std::make_unique<MCObjectFileInfo>();
   MOFI->initMCObjectFileInfo(Ctx, false);
-  return std::move(MOFI);
+  return MOFI;
 }
 
 int main(int const argc, char const *const *const argv) {
@@ -222,20 +240,20 @@ int main(int const argc, char const *const *const argv) {
   std::string error;
   std::string triple_name = sys::getDefaultTargetTriple();
   Triple const triple = Triple(triple_name);
-  Target const *const target = TargetRegistry::lookupTarget(triple_name, error);
+  Target const *const Target = TargetRegistry::lookupTarget(triple_name, error);
 
-  if (!target) {
+  if (!Target) {
     outs() << "Failed to lookup target: " << error << "\n";
     exit(1);
   }
 
   MCTargetOptions const options;
-  std::shared_ptr<MCRegisterInfo const> MRI(target->createMCRegInfo(triple));
+  std::shared_ptr<MCRegisterInfo const> MRI(Target->createMCRegInfo(triple));
   std::shared_ptr<MCAsmInfo const> MAI(
-      target->createMCAsmInfo(*MRI, triple, options));
+      Target->createMCAsmInfo(*MRI, triple, options));
   std::shared_ptr<MCSubtargetInfo const> STI(
-      target->createMCSubtargetInfo(triple, "", ""));
-  std::shared_ptr<MCInstrInfo const> MCII(target->createMCInstrInfo());
+      Target->createMCSubtargetInfo(triple, "", ""));
+  std::shared_ptr<MCInstrInfo const> MCII(Target->createMCInstrInfo());
 
   std::unique_ptr<SourceMgr> const SM =
       make_sm(argv[1]); // Lifetime bound to Ctx
@@ -246,16 +264,16 @@ int main(int const argc, char const *const *const argv) {
 
   ABISanFirstPassStreamer FPStreamer(
       Ctx, std::make_unique<formatted_raw_ostream>(nulls()),
-      std::unique_ptr<MCInstPrinter>(target->createMCInstPrinter(
+      std::unique_ptr<MCInstPrinter>(Target->createMCInstPrinter(
           triple, MAI->getAssemblerDialect(), *MAI, *MCII, *MRI)),
       std::unique_ptr<MCCodeEmitter>(),
       std::unique_ptr<MCAsmBackend>(
-          target->createMCAsmBackend(*STI, *MRI, options)));
+          Target->createMCAsmBackend(*STI, *MRI, options)));
 
   std::unique_ptr<MCAsmParser> FPParser(
       createMCAsmParser(*SM.get(), Ctx, FPStreamer, *MAI));
   std::unique_ptr<MCTargetAsmParser> FPTargetParser(
-      target->createMCAsmParser(*STI, *FPParser, *MCII, options));
+      Target->createMCAsmParser(*STI, *FPParser, *MCII, options));
   if (!FPTargetParser) {
     outs() << "No target-specific asm parser for triple!\n";
     exit(1);
@@ -266,25 +284,24 @@ int main(int const argc, char const *const *const argv) {
     exit(1);
   }
 
-  // Second pass starts here
-
   Ctx.reset();
-  Ctx.setObjectFileInfo(MOFI.get());
+
+  // Second pass starts here
 
   ABISanStreamer Streamer(
       Ctx, std::make_unique<formatted_raw_ostream>(outs()),
-      std::unique_ptr<MCInstPrinter>(target->createMCInstPrinter(
+      std::unique_ptr<MCInstPrinter>(Target->createMCInstPrinter(
           triple, MAI->getAssemblerDialect(), *MAI, *MCII, *MRI)),
       std::unique_ptr<MCCodeEmitter>(),
       std::unique_ptr<MCAsmBackend>(
-          target->createMCAsmBackend(*STI, *MRI, options)),
+          Target->createMCAsmBackend(*STI, *MRI, options)),
       *MCII, *STI, FPStreamer.global_symbol_names);
   Streamer.initSections(false, *STI);
 
   std::unique_ptr<MCAsmParser> Parser(
       createMCAsmParser(*SM.get(), Ctx, Streamer, *MAI));
   std::unique_ptr<MCTargetAsmParser> TargetParser(
-      target->createMCAsmParser(*STI, *Parser, *MCII, options));
+      Target->createMCAsmParser(*STI, *Parser, *MCII, options));
   if (!TargetParser) {
     outs() << "No target-specific asm parser for triple!\n";
     exit(1);

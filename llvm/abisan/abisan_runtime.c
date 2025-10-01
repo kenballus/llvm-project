@@ -57,7 +57,6 @@ struct taint_state {
   uint8_t r14;
   uint8_t r15;
   uint8_t rbp;
-  uint8_t eflags;
   // TODO: Track all the other registers
 } __attribute__((packed));
 
@@ -76,7 +75,6 @@ static_assert(TAINT_STATE_R13 == offsetof(struct taint_state, r13));
 static_assert(TAINT_STATE_R14 == offsetof(struct taint_state, r14));
 static_assert(TAINT_STATE_R15 == offsetof(struct taint_state, r15));
 static_assert(TAINT_STATE_RBP == offsetof(struct taint_state, rbp));
-static_assert(TAINT_STATE_EFLAGS == offsetof(struct taint_state, eflags));
 
 struct taint_state __abisan_taint_state = {.rax = 0xff,
                                            .rbx = 0xff,
@@ -92,8 +90,7 @@ struct taint_state __abisan_taint_state = {.rax = 0xff,
                                            .r13 = 0xff,
                                            .r14 = 0xff,
                                            .r15 = 0xff,
-                                           .rbp = 0xff,
-                                           .eflags = 0};
+                                           .rbp = 0xff};
 
 #define ABISAN_ERROR_START "\x1b[0;31mABISanitizer: "
 
@@ -317,7 +314,3 @@ __abisan_fail_mxcsr(struct shadow_stack_frame const *const frame,
 [[noreturn]] void __abisan_fail_taint_bp(void) { abisan_fail_taint("bp"); }
 
 [[noreturn]] void __abisan_fail_taint_bpl(void) { abisan_fail_taint("bpl"); }
-
-[[noreturn]] void __abisan_fail_taint_eflags(void) {
-  abisan_fail_taint("eflags");
-}
