@@ -64,8 +64,7 @@ public:
 };
 
 static std::vector<MCRegister>
-deduplicate_registers(std::vector<MCRegister> const &regs,
-                      MCRegisterInfo const &MRI) {
+deduplicate_registers(std::vector<MCRegister> const &regs) {
   std::vector<MCRegister> deduped_regs;
   for (auto const &reg : regs) {
     bool is_dup = false;
@@ -79,7 +78,13 @@ deduplicate_registers(std::vector<MCRegister> const &regs,
       deduped_regs.push_back(reg);
     }
   }
+  return deduped_regs;
+}
 
+static std::vector<MCRegister>
+deduplicate_subregisters(std::vector<MCRegister> const &regs,
+                         MCRegisterInfo const &MRI) {
+  std::vector<MCRegister> const deduped_regs(deduplicate_registers(regs));
   std::vector<MCRegister> result;
   for (auto const &r1 : deduped_regs) {
     bool is_sub = false;
@@ -113,17 +118,7 @@ get_written_registers(MCInst const &inst, MCInstrDesc const &MID,
     }
   }
 
-  unsigned const opcode = inst.getOpcode();
-  if (opcode == X86::SYSCALL) {
-    result.insert(result.end(), {X86::RCX, X86::R11, X86::RAX});
-  } else if (CALL_OPCODES.find(opcode) != CALL_OPCODES.end()) {
-    result.insert(
-        result.end(),
-        {X86::RAX,
-         X86::RDX}); // TODO: only do this depending on what the fn returns
-  }
-
-  return deduplicate_registers(result, MRI);
+  return deduplicate_subregisters(result, MRI);
 }
 
 static std::vector<MCRegister> get_read_registers(MCInst const &inst,
@@ -143,9 +138,10 @@ static std::vector<MCRegister> get_read_registers(MCInst const &inst,
   result.insert(result.end(), implicit_uses.begin(), implicit_uses.end());
   if (inst.getOpcode() == X86::SYSCALL) {
     result.push_back(X86::RAX);
+    // TODO: Check the syscall number and check more args conditionally
   }
 
-  return deduplicate_registers(result, MRI);
+  return deduplicate_subregisters(result, MRI);
 }
 
 static bool reg_is_taint_checked(MCRegister const &reg,
@@ -310,17 +306,18 @@ static std::string get_fail_taint_symbol(MCRegister const &reg,
   return result;
 }
 
-#define CALL_CLOBBERED_REGS                                                    \
-  X86::RDI, X86::RSI, X86::RCX, X86::R8, X86::R9, X86::R10, X86::R11
-
 class ABISanStreamer : public MCAsmStreamer {
   // Does the instrumentation :)
 
   MCInstrInfo const &MCII;
   MCSubtargetInfo const &STI;
   std::unordered_set<std::string> const &instrumented_symbol_names;
-  std::vector<MCRegister> clean_registers;
-  std::vector<MCRegister> dirty_registers;
+  std::vector<MCRegister>
+      clean_registers; // registers statically known to be clean. If X is clean,
+                       // it is implied that X's subregs are too.
+  std::vector<MCRegister>
+      dirty_registers; // registers statically known to be dirty. If X is dirty,
+                       // it is possible that X's subregs are not.
 
 public:
   ABISanStreamer(MCContext &Context, std::unique_ptr<formatted_raw_ostream> os,
@@ -489,11 +486,26 @@ public:
                    .addReg(0 /* segment register */)
                    .addImm(get_taint_clear_mask(reg, MRI))});
         }
+
         clean_registers.push_back(reg);
-        for (auto it = dirty_registers.begin(); it != dirty_registers.end();
-             it++) {
-          if (MRI.isSubRegisterEq(reg, *it)) {
-            dirty_registers.erase(it);
+        deduplicate_subregisters(clean_registers, MRI);
+        emitRawComment(Twine("Adding ").concat(
+            Twine(MRI.getName(reg)).concat(" to clean.")));
+
+        while (true) {
+          bool got_one = false;
+          for (auto it = dirty_registers.begin(); it != dirty_registers.end();
+               it++) {
+            if (MRI.isSubRegisterEq(reg, *it)) {
+              dirty_registers.erase(it);
+              emitRawComment(
+                  Twine("Removing ")
+                      .concat(Twine(MRI.getName(*it)).concat(" from dirty.")));
+              got_one = true;
+              break;
+            }
+          }
+          if (!got_one) {
             break;
           }
         }
@@ -506,7 +518,27 @@ public:
     insts.push_back(inst);
     if (std::find(CALL_OPCODES.begin(), CALL_OPCODES.end(), inst.getOpcode()) !=
         CALL_OPCODES.end()) {
-      for (auto const &reg : {CALL_CLOBBERED_REGS}) {
+
+      // return values go in RDX:RAX, so remove those from dirty
+      auto rax_loc =
+          std::find(dirty_registers.begin(), dirty_registers.end(), X86::RAX);
+      if (rax_loc != dirty_registers.end()) {
+        dirty_registers.erase(rax_loc);
+        emitRawComment(Twine("Removing RAX from dirty."));
+      }
+
+      auto rdx_loc =
+          std::find(dirty_registers.begin(), dirty_registers.end(), X86::RDX);
+      if (rdx_loc != dirty_registers.end()) {
+        dirty_registers.erase(rdx_loc);
+        emitRawComment(Twine("Removing RDX from dirty."));
+      }
+
+      static std::vector<MCRegister> const VOLATILE_REGS{
+          X86::RDI, X86::RSI, X86::RCX, X86::R8,
+          X86::R9,  X86::R10, X86::R11}; // RAX, RDX excluded because they might
+                                         // be used for return values
+      for (auto const &reg : VOLATILE_REGS) {
         insts.push_back(
             MCInstBuilder(X86::MOV8mi)
                 .addReg(X86::RIP)
@@ -521,30 +553,61 @@ public:
                 .addReg(0 /* segment register */)
                 .addImm(0b11111111));
       }
-      dirty_registers.clear();
-      dirty_registers.insert(dirty_registers.end(), {CALL_CLOBBERED_REGS});
+      emitRawComment(
+          Twine("Adding volatile registers to dirty, except rax and rdx"));
+      for (auto const &volatile_reg : VOLATILE_REGS) {
+        auto subregs = MRI.subregs_inclusive(volatile_reg);
+        dirty_registers.insert(dirty_registers.end(), subregs.begin(),
+                               subregs.end());
+      }
+      deduplicate_registers(dirty_registers);
+    } else if (inst.getOpcode() == X86::SYSCALL) {
+      for (auto const &reg : {X86::RCX, X86::R11}) {
+        insts.push_back(
+            MCInstBuilder(X86::MOV8mi)
+                .addReg(X86::RIP)
+                .addImm(1 /* scale */)
+                .addReg(0 /* index */)
+                .addExpr(MCBinaryExpr::createAdd(
+                    MCSymbolRefExpr::create(
+                        Ctx.getOrCreateSymbol("__abisan_taint_state"), Ctx),
+                    MCConstantExpr::create(get_taint_state_index(reg, MRI),
+                                           Ctx),
+                    Ctx))
+                .addReg(0 /* segment register */)
+                .addImm(0b11111111));
+      }
     }
     for (auto const &i : insts) {
       MCAsmStreamer::emitInstruction(i, STIArg);
     }
-    if (MID.mayAffectControlFlow(inst, MRI)) {
-      clean_registers.clear();
-    }
   }
 
   void emitLabel(MCSymbol *Symbol, SMLoc Loc = SMLoc()) override {
+    MCAsmStreamer::emitLabel(Symbol, Loc);
     clean_registers.clear();
     dirty_registers.clear();
-    dirty_registers.insert(dirty_registers.begin(), {X86::R11});
-    MCAsmStreamer::emitLabel(Symbol, Loc);
+    emitRawComment(Twine("Clearing clean and dirty."));
     for (auto const &instrumented_symbol_name : instrumented_symbol_names) {
       if (Symbol->getName().str() == instrumented_symbol_name) {
+        MCRegisterInfo const &MRI = *getContext().getRegisterInfo();
+        emitRawComment(Twine("Adding all non-arg registers to dirty."));
+        for (auto const &non_arg_reg : {X86::R11, X86::R12, X86::R13, X86::R14,
+                                        X86::R15, X86::RBP, X86::RBX}) {
+          auto subregs = MRI.subregs_inclusive(non_arg_reg);
+          dirty_registers.insert(dirty_registers.end(), subregs.begin(),
+                                 subregs.end());
+        }
+        // We can't add the arg registers to clean, because we don't know if
+        // they'll be used.
+
         MCAsmStreamer::emitInstruction(
             MCInstBuilder(X86::CALL64pcrel32)
                 .addExpr(MCSymbolRefExpr::create(
                     getContext().getOrCreateSymbol("__abisan_function_entry"),
                     getContext())),
             STI);
+        break;
       }
     }
   }

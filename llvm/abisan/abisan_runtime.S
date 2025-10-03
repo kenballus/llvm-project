@@ -46,7 +46,6 @@ __abisan_function_entry:
     add qword ptr [rip + __abisan_shadow_stack_pointer], SHADOW_STACK_FRAME_SIZE
 
     lea r11, [rip + __abisan_taint_state]
-    mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_RAX], 0xff
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_RBX], 0xff
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_R10], 0xff
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_R11], 0xff
