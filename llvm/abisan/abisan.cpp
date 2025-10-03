@@ -97,6 +97,12 @@ deduplicate_registers(std::vector<MCRegister> const &regs,
   return result;
 }
 
+static std::unordered_set<unsigned> const CALL_OPCODES{
+    X86::CALL16r, X86::CALL16m, X86::CALLpcrel16,
+    X86::CALL32r, X86::CALL32m, X86::CALLpcrel32,
+    X86::CALL64r, X86::CALL64m, X86::CALL64pcrel32,
+};
+
 static std::vector<MCRegister>
 get_written_registers(MCInst const &inst, MCInstrDesc const &MID,
                       MCRegisterInfo const &MRI) {
@@ -107,8 +113,14 @@ get_written_registers(MCInst const &inst, MCInstrDesc const &MID,
     }
   }
 
-  if (inst.getOpcode() == X86::SYSCALL) {
+  unsigned const opcode = inst.getOpcode();
+  if (opcode == X86::SYSCALL) {
     result.insert(result.end(), {X86::RCX, X86::R11, X86::RAX});
+  } else if (CALL_OPCODES.find(opcode) != CALL_OPCODES.end()) {
+    result.insert(
+        result.end(),
+        {X86::RAX,
+         X86::RDX}); // TODO: only do this depending on what the fn returns
   }
 
   return deduplicate_registers(result, MRI);
@@ -298,8 +310,8 @@ static std::string get_fail_taint_symbol(MCRegister const &reg,
   return result;
 }
 
-#define DEFAULT_DIRTY_REGS                                                     \
-  X86::RCX, X86::RDI, X86::RSI, X86::R8, X86::R9, X86::R10, X86::R11
+#define CALL_CLOBBERED_REGS                                                    \
+  X86::RDI, X86::RSI, X86::RCX, X86::R8, X86::R9, X86::R10, X86::R11
 
 class ABISanStreamer : public MCAsmStreamer {
   // Does the instrumentation :)
@@ -308,7 +320,7 @@ class ABISanStreamer : public MCAsmStreamer {
   MCSubtargetInfo const &STI;
   std::unordered_set<std::string> const &instrumented_symbol_names;
   std::vector<MCRegister> clean_registers;
-  std::vector<MCRegister> dirty_registers{DEFAULT_DIRTY_REGS};
+  std::vector<MCRegister> dirty_registers;
 
 public:
   ABISanStreamer(MCContext &Context, std::unique_ptr<formatted_raw_ostream> os,
@@ -491,11 +503,30 @@ public:
     if (have_affected_flags) {
       insts.push_back(MCInstBuilder(X86::POPF64));
     }
+    insts.push_back(inst);
+    if (std::find(CALL_OPCODES.begin(), CALL_OPCODES.end(), inst.getOpcode()) !=
+        CALL_OPCODES.end()) {
+      for (auto const &reg : {CALL_CLOBBERED_REGS}) {
+        insts.push_back(
+            MCInstBuilder(X86::MOV8mi)
+                .addReg(X86::RIP)
+                .addImm(1 /* scale */)
+                .addReg(0 /* index */)
+                .addExpr(MCBinaryExpr::createAdd(
+                    MCSymbolRefExpr::create(
+                        Ctx.getOrCreateSymbol("__abisan_taint_state"), Ctx),
+                    MCConstantExpr::create(get_taint_state_index(reg, MRI),
+                                           Ctx),
+                    Ctx))
+                .addReg(0 /* segment register */)
+                .addImm(0b11111111));
+      }
+      dirty_registers.clear();
+      dirty_registers.insert(dirty_registers.end(), {CALL_CLOBBERED_REGS});
+    }
     for (auto const &i : insts) {
       MCAsmStreamer::emitInstruction(i, STIArg);
     }
-    emitRawComment(Twine(" Real instruction:"));
-    MCAsmStreamer::emitInstruction(inst, STIArg);
     if (MID.mayAffectControlFlow(inst, MRI)) {
       clean_registers.clear();
     }
@@ -504,7 +535,7 @@ public:
   void emitLabel(MCSymbol *Symbol, SMLoc Loc = SMLoc()) override {
     clean_registers.clear();
     dirty_registers.clear();
-    dirty_registers.insert(dirty_registers.begin(), {DEFAULT_DIRTY_REGS});
+    dirty_registers.insert(dirty_registers.begin(), {X86::R11});
     MCAsmStreamer::emitLabel(Symbol, Loc);
     for (auto const &instrumented_symbol_name : instrumented_symbol_names) {
       if (Symbol->getName().str() == instrumented_symbol_name) {
