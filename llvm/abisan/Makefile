@@ -1,6 +1,6 @@
 CXX := clang++
 CC := clang
-CXXFLAGS := -ggdb -Wall -Wextra -Wpedantic -Wvla -Wshadow $(shell ../build/bin/llvm-config --cxxflags | sed 's/-I/-isystem /g') -fsanitize=address,undefined -isystem ../build/lib/Target/X86 -isystem ../lib/
+CXXFLAGS := -ggdb -Wall -Wextra -Wpedantic -Wvla -Wshadow $(shell ../build/bin/llvm-config --cxxflags | sed 's/-I/-isystem /g') -isystem ../build/lib/Target/X86 -isystem ../lib/Target/X86 -isystem ../lib/ -fsanitize=address,undefined
 CFLAGS := -ggdb -Wall -Wextra -Wpedantic -Wvla -Wshadow -std=c23
 LDFLAGS := -fuse-ld=lld $(shell ../build/bin/llvm-config --ldflags --libs all --system-libs)
 
