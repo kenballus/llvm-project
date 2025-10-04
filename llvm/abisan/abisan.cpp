@@ -12,6 +12,7 @@
 #include "Target/X86/X86RegisterInfo.h"
 #include "X86InstrInfo.h"
 #include "abisan_runtime.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/MC/MCAsmBackend.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCAsmStreamer.h"
@@ -37,9 +38,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/TargetParser/Host.h"
-#include <algorithm> // for std::find
-#include <cctype>    // for std::tolower
-#include <unordered_set>
+#include <cctype> // for std::tolower
 #include <vector>
 
 using namespace llvm;
@@ -48,7 +47,7 @@ class ABISanFirstPassStreamer : public MCAsmStreamer {
   // This class exists to make a first pass over the .s file to collect
   // all the names of the functions we want to instrument.
 public:
-  std::unordered_set<std::string> instrumented_symbol_names;
+  DenseSet<MCSymbol *> instrumented_symbols;
   ABISanFirstPassStreamer(MCContext &Context,
                           std::unique_ptr<formatted_raw_ostream> os,
                           std::unique_ptr<MCInstPrinter> printer,
@@ -65,45 +64,26 @@ public:
         Symbol->getName().str() != "_start") { // .globl and has code and is in
                                                // an executable section, or no
                                                // section, and not _start
-      instrumented_symbol_names.insert(Symbol->getName().str());
+      instrumented_symbols.insert(Symbol);
     }
     return result;
   }
 };
 
-static std::vector<MCRegister>
-deduplicate_registers(std::vector<MCRegister> const &regs) {
-  std::vector<MCRegister> deduped_regs;
-  for (auto const &reg : regs) {
-    bool is_dup = false;
-    for (auto const &dedup_reg : deduped_regs) {
-      if (dedup_reg == reg) {
-        is_dup = true;
-        break;
-      }
-    }
-    if (!is_dup) {
-      deduped_regs.push_back(reg);
-    }
-  }
-  return deduped_regs;
-}
-
-static std::vector<MCRegister>
-deduplicate_subregisters(std::vector<MCRegister> const &regs,
+static DenseSet<MCRegister>
+deduplicate_subregisters(DenseSet<MCRegister> const &regs,
                          MCRegisterInfo const &MRI) {
-  std::vector<MCRegister> const deduped_regs(deduplicate_registers(regs));
-  std::vector<MCRegister> result;
-  for (auto const &r1 : deduped_regs) {
+  DenseSet<MCRegister> result;
+  for (auto const &r1 : regs) {
     bool is_sub = false;
-    for (auto const &r2 : deduped_regs) {
+    for (auto const &r2 : regs) {
       if (MRI.isSubRegister(r2, r1)) {
         is_sub = true;
         break;
       }
     }
     if (!is_sub) {
-      result.push_back(r1);
+      result.insert(r1);
     }
   }
 
@@ -128,37 +108,36 @@ static unsigned get_register_size(MCRegister const &reg,
   return result;
 }
 
-static std::unordered_set<unsigned> const CALL_OPCODES{
+static DenseSet<unsigned> const CALL_OPCODES{
     X86::CALL16r, X86::CALL16m, X86::CALLpcrel16,
     X86::CALL32r, X86::CALL32m, X86::CALLpcrel32,
     X86::CALL64r, X86::CALL64m, X86::CALL64pcrel32,
 };
 
-static std::unordered_set<unsigned> const RET_OPCODES{X86::RET16, X86::RET32,
-                                                      X86::RET64};
+static DenseSet<unsigned> const RET_OPCODES{X86::RET16, X86::RET32, X86::RET64};
 
 // Nonvolatile registers
-static std::vector<MCRegister> const NONVOLATILE_REGS{
+static DenseSet<MCRegister> const NONVOLATILE_REGS{
     X86::RBP, X86::RBX, X86::R12, X86::R13, X86::R14, X86::R15};
 
 // Volatile registers that are not used for return values
-static std::vector<MCRegister> const CALL_CLOBBERED_REGS{
+static DenseSet<MCRegister> const CALL_CLOBBERED_REGS{
     X86::RDI, X86::RSI, X86::RCX, X86::R8, X86::R9, X86::R10, X86::R11};
 
 // Registers that are clobbered by a syscall
-static std::vector<MCRegister> const SYSCALL_CLOBBERED_REGS{X86::RCX, X86::R11};
+static DenseSet<MCRegister> const SYSCALL_CLOBBERED_REGS{X86::RCX, X86::R11};
 
 // Registers that are never used for any form of argument passing
-static std::vector<MCRegister> const NON_ARGUMENT_REGS{
+static DenseSet<MCRegister> const NON_ARGUMENT_REGS{
     X86::R11, X86::R12, X86::R13, X86::R14, X86::R15, X86::RBP, X86::RBX};
 
 // Registers that are used for return values
-static std::vector<MCRegister> const RETVAL_REGS{X86::RAX, X86::RDX};
+static DenseSet<MCRegister> const RETVAL_REGS{X86::RAX, X86::RDX};
 
 static bool reg_is_taint_checked(MCRegister const &reg,
                                  MCRegisterInfo const &MRI,
-                                 std::vector<MCRegister> const &excluded) {
-  static std::vector<MCRegister> const TAINT_CHECKED_REGISTERS{
+                                 DenseSet<MCRegister> const &excluded) {
+  static DenseSet<MCRegister> const TAINT_CHECKED_REGISTERS{
       X86::RAX, X86::RBX, X86::RCX, X86::RDX, X86::RDI,
       X86::RSI, X86::R8,  X86::R9,  X86::R10, X86::R11,
       X86::R12, X86::R13, X86::R14, X86::R15, X86::RBP};
@@ -177,11 +156,22 @@ static bool reg_is_taint_checked(MCRegister const &reg,
   return false;
 }
 
-static std::vector<MCRegister>
-get_cleaned_registers(MCInst const &inst, MCInstrDesc const &MID,
-                      MCRegisterInfo const &MRI) {
-  // The registers that are cleaned as a result of this instruction.
-  std::vector<MCRegister> written_registers;
+static DenseSet<MCRegister> get_tainted_registers(MCInst const &inst) {
+  // The registers that are tainted as a result of this instruction.
+  unsigned const opcode = inst.getOpcode();
+  DenseSet<MCRegister> result;
+  if (opcode == X86::SYSCALL) {
+    result = SYSCALL_CLOBBERED_REGS;
+  } else if (CALL_OPCODES.contains(opcode)) {
+    result = CALL_CLOBBERED_REGS;
+  }
+  return result;
+}
+
+static DenseSet<MCRegister> get_written_registers(MCInst const &inst,
+                                                  MCInstrDesc const &MID,
+                                                  MCRegisterInfo const &MRI) {
+  DenseSet<MCRegister> result;
   for (unsigned i = 0; i < MID.getNumDefs(); i++) {
     auto const &op = inst.getOperand(i);
     if (op.isReg() && op.getReg().isPhysical()) {
@@ -195,104 +185,94 @@ get_cleaned_registers(MCInst const &inst, MCInstrDesc const &MID,
           }
         }
       }
-      written_registers.push_back(reg);
+      result.insert(reg);
     }
   }
 
   if (inst.getOpcode() == X86::SYSCALL) {
-    written_registers.push_back(X86::RAX);
+    result.insert(X86::RAX);
   }
 
   auto const &implicit_defs = MID.implicit_defs();
-  written_registers.insert(written_registers.end(), implicit_defs.begin(),
-                           implicit_defs.end());
-
-  std::vector<MCRegister> result;
-  for (auto const &reg : written_registers) {
-    if (reg_is_taint_checked(reg, MRI, {})) {
-      result.push_back(reg);
-    }
-  }
-
+  result.insert(implicit_defs.begin(), implicit_defs.end());
   return deduplicate_subregisters(result, MRI);
 }
 
-static std::vector<MCRegister>
-get_undirtied_registers(MCInst const &inst, MCInstrDesc const &MID,
-                        MCRegisterInfo const &MRI) {
+static DenseSet<MCRegister> get_uncleaned_registers(MCInst const &inst,
+                                                    MCInstrDesc const &MID,
+                                                    MCRegisterInfo const &MRI) {
+  static DenseSet<unsigned> const POP_OPCODES{
+      X86::POP16r,   X86::POP16rmm, X86::POP2,     X86::POP2P,   X86::POP32r,
+      X86::POP32rmm, X86::POP64r,   X86::POP64rmm, X86::POPA16,  X86::POPA32,
+      X86::POPDS16,  X86::POPDS32,  X86::POPES16,  X86::POPES32, X86::POPF16,
+      X86::POPF32,   X86::POPF64,   X86::POPFS16,  X86::POPFS32, X86::POPFS64,
+      X86::POPGS16,  X86::POPGS32,  X86::POPGS64,  X86::POPP64r, X86::POPSS16,
+      X86::POPSS32,
+  };
+
+  DenseSet<MCRegister> result(get_tainted_registers(inst));
+  if (POP_OPCODES.contains(inst.getOpcode())) {
+    for (auto const &pop_operand : get_written_registers(inst, MID, MRI)) {
+      if (reg_is_taint_checked(pop_operand, MRI, {})) {
+        result.insert(pop_operand);
+      }
+    }
+  }
+  return result;
+}
+
+static DenseSet<MCRegister> get_cleaned_registers(MCInst const &inst,
+                                                  MCInstrDesc const &MID,
+                                                  MCRegisterInfo const &MRI) {
+  // The registers that are cleaned as a result of this instruction.
+
+  DenseSet<MCRegister> result;
+  for (auto const &reg : get_written_registers(inst, MID, MRI)) {
+    if (reg_is_taint_checked(reg, MRI, {})) {
+      result.insert(reg);
+    }
+  }
+
+  for (auto const &uncleaned_reg : get_uncleaned_registers(inst, MID, MRI)) {
+    result.erase(uncleaned_reg);
+  }
+
+  return result;
+}
+
+static DenseSet<MCRegister> get_undirtied_registers(MCInst const &inst,
+                                                    MCInstrDesc const &MID,
+                                                    MCRegisterInfo const &MRI) {
   // The registers that are untainted as a result of this instruction.
   // Note that this is not the same as being cleaned; it just means if
   // we were previously certain that this register is dirty, we aren't
   // any longer after this instruction.
   unsigned const opcode = inst.getOpcode();
-  std::vector<MCRegister> result = get_cleaned_registers(inst, MID, MRI);
-  if (std::find(CALL_OPCODES.begin(), CALL_OPCODES.end(), opcode) !=
-      CALL_OPCODES.end()) {
+  DenseSet<MCRegister> result = get_cleaned_registers(inst, MID, MRI);
+  if (CALL_OPCODES.contains(opcode)) {
     for (auto const &reg : RETVAL_REGS) {
       auto subregs = MRI.subregs_inclusive(reg);
-      result.insert(result.end(), subregs.begin(), subregs.end());
+      result.insert(subregs.begin(), subregs.end());
     }
   }
   return result;
 }
 
-static std::vector<MCRegister> get_tainted_registers(MCInst const &inst) {
-  // The registers that are tainted as a result of this instruction.
-  unsigned const opcode = inst.getOpcode();
-  std::vector<MCRegister> result;
-  if (opcode == X86::SYSCALL) {
-    result = SYSCALL_CLOBBERED_REGS;
-  } else if (std::find(CALL_OPCODES.begin(), CALL_OPCODES.end(), opcode) !=
-             CALL_OPCODES.end()) {
-    result = CALL_CLOBBERED_REGS;
-  }
-  return result;
-}
-
-static std::vector<MCRegister>
-get_dirtied_registers(MCInst const &inst, MCRegisterInfo const &MRI) {
+static DenseSet<MCRegister> get_dirtied_registers(MCInst const &inst,
+                                                  MCRegisterInfo const &MRI) {
   // The registers that are dirtied as a result of this instruction.
-  std::vector<MCRegister> result;
+  DenseSet<MCRegister> result;
   for (auto const &reg : get_tainted_registers(inst)) {
     auto subregs = MRI.subregs_inclusive(reg);
-    result.insert(result.end(), subregs.begin(), subregs.end());
+    result.insert(subregs.begin(), subregs.end());
   }
   return result;
 }
 
-static std::vector<MCRegister>
+static DenseSet<MCRegister>
 get_required_clean_registers(MCInst const &inst, MCInstrDesc const &MID,
                              MCRegisterInfo const &MRI) {
-  // Returns the registers that must be clean for this instruction to execute.
-  std::vector<MCRegister> read_registers;
-  for (unsigned i = MID.getNumDefs(); i < MID.getNumOperands(); i++) {
-    auto const &op = inst.getOperand(i);
-    if (op.isReg() && op.getReg().isPhysical()) {
-      read_registers.push_back(op.getReg());
-    }
-  }
-
-  auto const &implicit_uses = MID.implicit_uses();
-  read_registers.insert(read_registers.end(), implicit_uses.begin(),
-                        implicit_uses.end());
-  if (inst.getOpcode() == X86::SYSCALL) {
-    read_registers.push_back(X86::EAX);
-    // TODO: Check the syscall number and check more args conditionally
-  }
-
-  std::vector<MCRegister> result;
-  for (auto const &reg : read_registers) {
-    if (reg_is_taint_checked(reg, MRI, {})) {
-      result.push_back(reg);
-    }
-  }
-
-  return deduplicate_subregisters(result, MRI);
-}
-
-static bool inst_needs_taint_check(MCInst const &inst, MCInstrDesc const &MID,
-                                   MCRegisterInfo const &MRI) {
-  static std::unordered_set<unsigned> const TAINT_UNCHECKED_OPCODES{
+  static DenseSet<unsigned> const PUSH_OPCODES{
       X86::PUSH16i,   X86::PUSH16i8, X86::PUSH16r,   X86::PUSH16rmm,
       X86::PUSH16rmr, X86::PUSH2,    X86::PUSH2P,    X86::PUSH32i,
       X86::PUSH32i8,  X86::PUSH32r,  X86::PUSH32rmm, X86::PUSH32rmr,
@@ -304,20 +284,48 @@ static bool inst_needs_taint_check(MCInst const &inst, MCInstrDesc const &MID,
       X86::PUSHGS32,  X86::PUSHGS64, X86::PUSHP64r,  X86::PUSHSS16,
       X86::PUSHSS32};
 
-  static std::unordered_set<unsigned> const XOR_RR_OPCODES{
+  static DenseSet<unsigned> const XOR_RR_OPCODES{
       X86::XOR8rr,
       X86::XOR16rr,
       X86::XOR32rr,
       X86::XOR64rr,
   };
   unsigned const opcode = inst.getOpcode();
-  if (XOR_RR_OPCODES.find(opcode) != XOR_RR_OPCODES.end() &&
+  if (XOR_RR_OPCODES.contains(opcode) &&
       get_required_clean_registers(inst, MID, MRI).size() == 1) {
     // xor $x, $x
-    return false;
+    return {};
+  }
+  if (PUSH_OPCODES.contains(opcode)) {
+    // push is used for saving registers, so it's allowed to access dirty or
+    // tainted registers
+    return {};
   }
 
-  return TAINT_UNCHECKED_OPCODES.find(opcode) == TAINT_UNCHECKED_OPCODES.end();
+  // Returns the registers that must be clean for this instruction to execute.
+  DenseSet<MCRegister> read_registers;
+  for (unsigned i = MID.getNumDefs(); i < MID.getNumOperands(); i++) {
+    auto const &op = inst.getOperand(i);
+    if (op.isReg() && op.getReg().isPhysical()) {
+      read_registers.insert(op.getReg());
+    }
+  }
+
+  auto const &implicit_uses = MID.implicit_uses();
+  read_registers.insert(implicit_uses.begin(), implicit_uses.end());
+  if (inst.getOpcode() == X86::SYSCALL) {
+    read_registers.insert(X86::EAX);
+    // TODO: Check the syscall number and check more args conditionally
+  }
+
+  DenseSet<MCRegister> result;
+  for (auto const &reg : read_registers) {
+    if (reg_is_taint_checked(reg, MRI, {})) {
+      result.insert(reg);
+    }
+  }
+
+  return deduplicate_subregisters(result, MRI);
 }
 
 static uint8_t get_taint_check_mask(MCRegister const &reg,
@@ -418,15 +426,11 @@ class ABISanStreamer : public MCAsmStreamer {
 
   MCInstrInfo const &MCII;
   MCSubtargetInfo const &STI;
-  std::unordered_set<std::string> const &instrumented_symbol_names;
-  std::vector<MCRegister>
-      clean; // Registers statically known to be clean. If X is clean,
-             // it is implied that X's subregs are too.
-  std::vector<MCRegister>
-      dirty; // Registers statically known to be dirty. If X is dirty,
-             // it is possible that X's subregs are not.
-
-  void deduplicate_dirty() { dirty = deduplicate_registers(dirty); }
+  DenseSet<MCSymbol *> const &instrumented_symbols;
+  DenseSet<MCRegister> clean; // Registers statically known to be clean. If X is
+                              // clean, it is implied that X's subregs are too.
+  DenseSet<MCRegister> dirty; // Registers statically known to be dirty. If X is
+                              // dirty, it is possible that X's subregs are not.
 
   void deduplicate_clean() {
     clean = deduplicate_subregisters(clean, *getContext().getRegisterInfo());
@@ -581,10 +585,10 @@ public:
                  std::unique_ptr<MCCodeEmitter> emitter,
                  std::unique_ptr<MCAsmBackend> asmbackend,
                  MCInstrInfo const &mcii, MCSubtargetInfo const &sti,
-                 std::unordered_set<std::string> const &gsn)
+                 DenseSet<MCSymbol *> const &symbols_to_instrument)
       : MCAsmStreamer(Context, std::move(os), std::move(printer),
                       std::move(emitter), std::move(asmbackend)),
-        MCII(mcii), STI(sti), instrumented_symbol_names(gsn) {}
+        MCII(mcii), STI(sti), instrumented_symbols(symbols_to_instrument) {}
 
   void emitInstruction(MCInst const &inst, MCSubtargetInfo const &) override {
     MCContext &Ctx = getContext();
@@ -593,10 +597,9 @@ public:
 
     bool have_emitted_instrumentation = false;
     for (auto const &reg : get_required_clean_registers(inst, MID, MRI)) {
-      if (inst_needs_taint_check(inst, MID, MRI) &&
-          reg_is_taint_checked(reg, MRI, clean)) {
+      if (reg_is_taint_checked(reg, MRI, clean)) {
         // If this register is statically known to be dirty, issue a warning
-        if (std::find(dirty.begin(), dirty.end(), reg) != dirty.end()) {
+        if (dirty.contains(reg)) {
           Ctx.reportWarning(getStartTokLoc(),
                             Twine("you will access a tainted ")
                                 .concat(Twine(MRI.getName(reg)))
@@ -632,21 +635,23 @@ public:
 
     // Remove the undirtied registers from dirty
     for (auto const &reg : get_undirtied_registers(inst, MID, MRI)) {
-      auto the_find = std::find(dirty.begin(), dirty.end(), reg);
-      if (the_find != dirty.end()) {
-        dirty.erase(the_find);
-      }
+      dirty.erase(reg);
+    }
+
+    // Remove the uncleaned registers from clean
+    for (auto const &reg : get_uncleaned_registers(inst, MID, MRI)) {
+      emitRawComment(Twine("Uncleaning ").concat(MRI.getName(reg)));
+      clean.erase(reg);
     }
 
     // Mark the cleaned registers as clean
     auto const &cleaned_regs = get_cleaned_registers(inst, MID, MRI);
-    clean.insert(clean.end(), cleaned_regs.begin(), cleaned_regs.end());
+    clean.insert(cleaned_regs.begin(), cleaned_regs.end());
     deduplicate_clean();
 
     // Mark the dirtied registers as dirty
     auto const &dirtied_regs = get_dirtied_registers(inst, MRI);
-    dirty.insert(dirty.end(), dirtied_regs.begin(), dirtied_regs.end());
-    deduplicate_dirty();
+    dirty.insert(dirtied_regs.begin(), dirtied_regs.end());
 
     // Emit taint instructions for each tainted register
     // This needs to happen after the instruction is emitted because it won't
@@ -662,8 +667,7 @@ public:
 
     // If the instruction is a ret, and any nonvolatile register is clean, issue
     // a warning
-    if (std::find(RET_OPCODES.begin(), RET_OPCODES.end(), inst.getOpcode()) !=
-        RET_OPCODES.end()) {
+    if (RET_OPCODES.contains(inst.getOpcode())) {
       for (auto const &clean_reg : clean) {
         for (auto const &nv_reg : NONVOLATILE_REGS) {
           if (MRI.isSubRegisterEq(nv_reg, clean_reg)) {
@@ -683,14 +687,14 @@ public:
     // we need to clear the dirty and clean sets.
     clean.clear();
     dirty.clear();
-    for (auto const &instrumented_symbol_name : instrumented_symbol_names) {
-      if (Symbol->getName().str() == instrumented_symbol_name) {
+    for (auto instrumented_symbol : instrumented_symbols) {
+      if (Symbol->getName().str() == instrumented_symbol->getName().str()) {
         MCRegisterInfo const &MRI = *getContext().getRegisterInfo();
         // Mark the non-arg registers as dirty.
         // The corresponding tainting happens in __abisan_function_entry
         for (auto const &non_arg_reg : NON_ARGUMENT_REGS) {
           auto subregs = MRI.subregs_inclusive(non_arg_reg);
-          dirty.insert(dirty.end(), subregs.begin(), subregs.end());
+          dirty.insert(subregs.begin(), subregs.end());
         }
         // No need to deduplicate here because we know that the dirty set was
         // empty. Unless any of the non_arg_regs overlap? This isn't a thing on
@@ -803,7 +807,7 @@ int main(int const argc, char const *const *const argv) {
       std::unique_ptr<MCCodeEmitter>(),
       std::unique_ptr<MCAsmBackend>(
           Target->createMCAsmBackend(*STI, *MRI, options)),
-      *MCII, *STI, FPStreamer.instrumented_symbol_names);
+      *MCII, *STI, FPStreamer.instrumented_symbols);
   Streamer.initSections(false, *STI);
 
   std::unique_ptr<MCAsmParser> Parser(
