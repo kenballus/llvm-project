@@ -111,6 +111,9 @@ static std::unordered_set<unsigned> const CALL_OPCODES{
 static std::vector<MCRegister>
 get_written_registers(MCInst const &inst, MCInstrDesc const &MID,
                       MCRegisterInfo const &MRI) {
+  // Returns the set of registers that the instruction writes to in a
+  // predictable way. That is, if an instruction writes an indeterminate value
+  // to a register, it should not show up here.
   std::vector<MCRegister> result;
   for (unsigned i = 0; i < MID.getNumDefs(); i++) {
     auto const &op = inst.getOperand(i);
@@ -120,6 +123,10 @@ get_written_registers(MCInst const &inst, MCInstrDesc const &MID,
   }
 
   // TODO: handle variadic operands
+
+  if (inst.getOpcode() == X86::SYSCALL) {
+    result.push_back(X86::RAX);
+  }
 
   auto const &implicit_defs = MID.implicit_defs();
   result.insert(result.end(), implicit_defs.begin(), implicit_defs.end());
@@ -228,15 +235,15 @@ static uint8_t get_taint_check_mask(MCRegister const &reg,
     case X86::BH:
     case X86::CH:
     case X86::DH:
-      return 0b00000010;
+      return 0b10;
     }
-    return 0b00000001;
+    return 0b1;
   case 16:
-    return 0b00000011;
+    return 0b11;
   case 32:
-    return 0b00001111;
+    return 0xf;
   case 64:
-    return 0b11111111;
+    return 0xff;
   }
   outs() << "Invalid register passed to get_taint_mask.\n";
   exit(1);
@@ -318,11 +325,17 @@ class ABISanStreamer : public MCAsmStreamer {
   MCSubtargetInfo const &STI;
   std::unordered_set<std::string> const &instrumented_symbol_names;
   std::vector<MCRegister>
-      clean_registers; // registers statically known to be clean. If X is clean,
-                       // it is implied that X's subregs are too.
+      clean; // Registers statically known to be clean. If X is clean,
+             // it is implied that X's subregs are too.
   std::vector<MCRegister>
-      dirty_registers; // registers statically known to be dirty. If X is dirty,
-                       // it is possible that X's subregs are not.
+      dirty; // Registers statically known to be dirty. If X is dirty,
+             // it is possible that X's subregs are not.
+
+  void deduplicate_dirty() { dirty = deduplicate_registers(dirty); }
+
+  void deduplicate_clean() {
+    clean = deduplicate_subregisters(clean, *getContext().getRegisterInfo());
+  }
 
   void emit_instructions(std::vector<MCInst> insts) {
     for (auto const &i : insts) {
@@ -349,11 +362,10 @@ public:
     bool have_affected_flags = false;
     for (auto const &reg : get_read_registers(inst, MID, MRI)) {
       if (inst_is_taint_checked(inst, MID, MRI) &&
-          reg_is_taint_checked(reg, MRI, clean_registers)) {
-        if (std::find(dirty_registers.begin(), dirty_registers.end(), reg) !=
-            dirty_registers.end()) {
-          errs() << "\x1b[0;31mABISanitizer warning: you accessed a tainted "
-                 << MRI.getName(reg) << "\x1b[0m";
+          reg_is_taint_checked(reg, MRI, clean)) {
+        if (std::find(dirty.begin(), dirty.end(), reg) != dirty.end()) {
+          errs() << "\x1b[0;31mABISanitizer warning: you will access a tainted "
+                 << MRI.getName(reg) << "\x1b[0m\n";
         }
         if (!have_affected_flags) {
           emit_instructions({
@@ -375,7 +387,7 @@ public:
         }
 
         uint8_t const taint_check_mask = get_taint_check_mask(reg, MRI);
-        if (taint_check_mask == 0b11111111) {
+        if (taint_check_mask == 0xff) {
           emit_instructions({
               // cmp byte ptr [rip + __abisan_taint_state +
               // TAINT_STATE_$REG], 0
@@ -484,15 +496,16 @@ public:
                    .addImm(get_taint_clear_mask(reg, MRI))});
         }
 
-        clean_registers.push_back(reg);
-        deduplicate_subregisters(clean_registers, MRI);
+        clean.push_back(reg);
+        deduplicate_clean();
 
+        // Since we just added reg to clean, we need to remove it and its
+        // subregisters from dirty.
         while (true) {
           bool got_one = false;
-          for (auto it = dirty_registers.begin(); it != dirty_registers.end();
-               it++) {
+          for (auto it = dirty.begin(); it != dirty.end(); it++) {
             if (MRI.isSubRegisterEq(reg, *it)) {
-              dirty_registers.erase(it);
+              dirty.erase(it);
               got_one = true;
               break;
             }
@@ -511,24 +524,29 @@ public:
     if (std::find(CALL_OPCODES.begin(), CALL_OPCODES.end(), inst.getOpcode()) !=
         CALL_OPCODES.end()) {
 
-      // return values go in RDX:RAX, so remove those from dirty
-      auto rax_loc =
-          std::find(dirty_registers.begin(), dirty_registers.end(), X86::RAX);
-      if (rax_loc != dirty_registers.end()) {
-        dirty_registers.erase(rax_loc);
+      // Remove retval registers from dirty.
+      // Note that we don't mark them as clean because that's not known.
+      // If we're calling an instrumented function, then the taint state should
+      // already be correct. If we're calling an uninstrumented function, we
+      // probably need to just mark these as clean.
+      // TODO: Implement this distinction instead of assuming that every call is
+      // instrumented.
+      static std::vector<MCRegister> const RETVAL_REGS{X86::RAX, X86::RDX};
+      for (auto const &reg : RETVAL_REGS) {
+        for (auto const &subreg : MRI.subregs_inclusive(reg)) {
+          auto the_find = std::find(dirty.begin(), dirty.end(), subreg);
+          if (the_find != dirty.end()) {
+            dirty.erase(the_find);
+          }
+        }
       }
 
-      auto rdx_loc =
-          std::find(dirty_registers.begin(), dirty_registers.end(), X86::RDX);
-      if (rdx_loc != dirty_registers.end()) {
-        dirty_registers.erase(rdx_loc);
-      }
-
-      static std::vector<MCRegister> const VOLATILE_REGS{
+      static std::vector<MCRegister> const NON_RETVAL_VOLATILE_REGS{
           X86::RDI, X86::RSI, X86::RCX, X86::R8,
           X86::R9,  X86::R10, X86::R11}; // RAX, RDX excluded because they might
                                          // be used for return values
-      for (auto const &reg : VOLATILE_REGS) {
+      // Taint every volatile register that isn't used for return values.
+      for (auto const &reg : NON_RETVAL_VOLATILE_REGS) {
         emit_instructions(
             {MCInstBuilder(X86::MOV8mi)
                  .addReg(X86::RIP)
@@ -541,16 +559,18 @@ public:
                                             Ctx),
                      Ctx))
                  .addReg(0 /* segment register */)
-                 .addImm(0b11111111)});
+                 .addImm(0xff)});
       }
-      for (auto const &volatile_reg : VOLATILE_REGS) {
+      // Dirty every volatile register that isn't used for return values.
+      for (auto const &volatile_reg : NON_RETVAL_VOLATILE_REGS) {
         auto subregs = MRI.subregs_inclusive(volatile_reg);
-        dirty_registers.insert(dirty_registers.end(), subregs.begin(),
-                               subregs.end());
+        dirty.insert(dirty.end(), subregs.begin(), subregs.end());
       }
-      deduplicate_registers(dirty_registers);
+      deduplicate_dirty();
     } else if (inst.getOpcode() == X86::SYSCALL) {
+      // syscall taints RCX and R11
       for (auto const &reg : {X86::RCX, X86::R11}) {
+        // Taint the register
         emit_instructions(
             {MCInstBuilder(X86::MOV8mi)
                  .addReg(X86::RIP)
@@ -563,34 +583,45 @@ public:
                                             Ctx),
                      Ctx))
                  .addReg(0 /* segment register */)
-                 .addImm(0b11111111)});
+                 .addImm(0xff)});
+        // Mark the register and its subregisters as dirty.
+        auto subregs = MRI.subregs_inclusive(reg);
+        dirty.insert(dirty.end(), subregs.begin(), subregs.end());
+        deduplicate_dirty();
       }
     }
   }
 
   void emitLabel(MCSymbol *Symbol, SMLoc Loc = SMLoc()) override {
     MCAsmStreamer::emitLabel(Symbol, Loc);
-    clean_registers.clear();
-    dirty_registers.clear();
+    // Because a label could be a jump target,
+    // we need to clear the dirty and clean sets.
+    clean.clear();
+    dirty.clear();
     for (auto const &instrumented_symbol_name : instrumented_symbol_names) {
       if (Symbol->getName().str() == instrumented_symbol_name) {
         MCRegisterInfo const &MRI = *getContext().getRegisterInfo();
+        // Mark the non-arg registers as dirty.
+        // The corresponding tainting happens in __abisan_function_entry
         for (auto const &non_arg_reg : {X86::R11, X86::R12, X86::R13, X86::R14,
                                         X86::R15, X86::RBP, X86::RBX}) {
           auto subregs = MRI.subregs_inclusive(non_arg_reg);
-          dirty_registers.insert(dirty_registers.end(), subregs.begin(),
-                                 subregs.end());
+          dirty.insert(dirty.end(), subregs.begin(), subregs.end());
         }
+        // No need to deduplicate here because we know that the dirty set was
+        // empty. Unless any of the non_arg_regs overlap? This isn't a thing on
+        // x86, at least.
+
         // We can't add the arg registers to clean, because we don't know if
         // they'll be used.
 
-        MCAsmStreamer::emitInstruction(
-            MCInstBuilder(X86::CALL64pcrel32)
-                .addExpr(MCSymbolRefExpr::create(
-                    getContext().getOrCreateSymbol("__abisan_function_entry"),
-                    getContext())),
-            STI);
-        break;
+        // call __abisan_function_entry
+        emit_instructions(
+            {MCInstBuilder(X86::CALL64pcrel32)
+                 .addExpr(MCSymbolRefExpr::create(
+                     getContext().getOrCreateSymbol("__abisan_function_entry"),
+                     getContext()))});
+        return;
       }
     }
   }
@@ -645,14 +676,18 @@ int main(int const argc, char const *const *const argv) {
   std::shared_ptr<MCInstrInfo const> MCII(Target->createMCInstrInfo());
 
   std::unique_ptr<SourceMgr> const SM =
-      make_sm(argv[1]); // Lifetime bound to Ctx
-  MCContext Ctx(triple, MAI.get(), MRI.get(), STI.get(), SM.get());
-  std::unique_ptr<MCObjectFileInfo const> MOFI =
-      make_mofi(Ctx); // Lifetime bound to Ctx
-  Ctx.setObjectFileInfo(MOFI.get());
+      make_sm(argv[1]); // Lifetime bound to FPCtx and Ctx
+  MCContext FPCtx(triple, MAI.get(), MRI.get(), STI.get(), SM.get());
+  std::unique_ptr<MCObjectFileInfo const> FPMOFI =
+      make_mofi(FPCtx); // Lifetime bound to FPCtx
+  FPCtx.setObjectFileInfo(FPMOFI.get());
+
+  // First pass starts here.
+  // The point of the first pass is to locate all the symbols that need to be
+  // instrumented.
 
   ABISanFirstPassStreamer FPStreamer(
-      Ctx, std::make_unique<formatted_raw_ostream>(nulls()),
+      FPCtx, std::make_unique<formatted_raw_ostream>(nulls()),
       std::unique_ptr<MCInstPrinter>(Target->createMCInstPrinter(
           triple, MAI->getAssemblerDialect(), *MAI, *MCII, *MRI)),
       std::unique_ptr<MCCodeEmitter>(),
@@ -660,7 +695,7 @@ int main(int const argc, char const *const *const argv) {
           Target->createMCAsmBackend(*STI, *MRI, options)));
 
   std::unique_ptr<MCAsmParser> FPParser(
-      createMCAsmParser(*SM.get(), Ctx, FPStreamer, *MAI));
+      createMCAsmParser(*SM.get(), FPCtx, FPStreamer, *MAI));
   std::unique_ptr<MCTargetAsmParser> FPTargetParser(
       Target->createMCAsmParser(*STI, *FPParser, *MCII, options));
   if (!FPTargetParser) {
@@ -673,9 +708,13 @@ int main(int const argc, char const *const *const argv) {
     exit(1);
   }
 
-  Ctx.reset();
+  // Second pass starts here.
+  // This is where the instrumentation actually happens.
 
-  // Second pass starts here
+  MCContext Ctx(triple, MAI.get(), MRI.get(), STI.get(), SM.get());
+  std::unique_ptr<MCObjectFileInfo const> MOFI =
+      make_mofi(Ctx); // Lifetime bound to Ctx
+  Ctx.setObjectFileInfo(MOFI.get());
 
   ABISanStreamer Streamer(
       Ctx, std::make_unique<formatted_raw_ostream>(outs()),
