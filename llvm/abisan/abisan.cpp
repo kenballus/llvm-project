@@ -372,8 +372,10 @@ public:
       if (inst_is_taint_checked(inst, MID, MRI) &&
           reg_is_taint_checked(reg, MRI, clean)) {
         if (std::find(dirty.begin(), dirty.end(), reg) != dirty.end()) {
-          errs() << "\x1b[0;31mABISanitizer warning: you will access a tainted "
-                 << MRI.getName(reg) << "\x1b[0m\n";
+          Ctx.reportWarning(getStartTokLoc(),
+                            Twine("you will access a tainted ")
+                                .concat(Twine(MRI.getName(reg)))
+                                .concat(Twine(".")));
         }
         if (!have_affected_flags) {
           emit_instructions({
