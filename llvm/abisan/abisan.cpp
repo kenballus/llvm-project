@@ -1,3 +1,11 @@
+/*
+ * ABI Sanitizer
+ * This is an unconventional kind of LLVM pass.
+ * Basically, it instantiates a MCAsmStreamer for x86-64 that
+ * statically checks for some ABI violations, and emits
+ * dynamic checks when this gets hard.
+ */
+
 #include "Target/X86/MCTargetDesc/X86BaseInfo.h"
 #include "Target/X86/MCTargetDesc/X86MCTargetDesc.h"
 #include "Target/X86/X86.h"
