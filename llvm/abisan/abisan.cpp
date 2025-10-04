@@ -110,11 +110,23 @@ deduplicate_subregisters(std::vector<MCRegister> const &regs,
   return result;
 }
 
-static std::unordered_set<unsigned> const CALL_OPCODES{
-    X86::CALL16r, X86::CALL16m, X86::CALLpcrel16,
-    X86::CALL32r, X86::CALL32m, X86::CALLpcrel32,
-    X86::CALL64r, X86::CALL64m, X86::CALL64pcrel32,
-};
+static unsigned get_register_size(MCRegister const &reg,
+                                  MCRegisterInfo const &MRI) {
+  unsigned result = 0;
+  for (auto const &RC : MRI.regclasses()) {
+    if (RC.contains(reg)) {
+      unsigned const size = RC.getSizeInBits();
+      if (size > result) {
+        result = size;
+      }
+    }
+  }
+  if (result == 0) {
+    outs() << "Unable to find register class for " << MRI.getName(reg) << "!\n";
+    exit(1);
+  }
+  return result;
+}
 
 static std::vector<MCRegister>
 get_written_registers(MCInst const &inst, MCInstrDesc const &MID,
@@ -126,7 +138,17 @@ get_written_registers(MCInst const &inst, MCInstrDesc const &MID,
   for (unsigned i = 0; i < MID.getNumDefs(); i++) {
     auto const &op = inst.getOperand(i);
     if (op.isReg() && op.getReg().isPhysical()) {
-      result.push_back(op.getReg());
+      MCRegister reg = op.getReg();
+      if (get_register_size(reg, MRI) == 32) {
+        // On x86-64, 32-bit writes are zero-extended
+        for (auto const &superreg : MRI.superregs(reg)) {
+          if (get_register_size(superreg, MRI) == 64) {
+            reg = superreg;
+            break;
+          }
+        }
+      }
+      result.push_back(reg);
     }
   }
 
@@ -214,24 +236,6 @@ static bool inst_is_taint_checked(MCInst const &inst, MCInstrDesc const &MID,
   }
 
   return TAINT_UNCHECKED_OPCODES.find(opcode) == TAINT_UNCHECKED_OPCODES.end();
-}
-
-static unsigned get_register_size(MCRegister const &reg,
-                                  MCRegisterInfo const &MRI) {
-  unsigned result = 0;
-  for (auto const &RC : MRI.regclasses()) {
-    if (RC.contains(reg)) {
-      unsigned const size = RC.getSizeInBits();
-      if (size > result) {
-        result = size;
-      }
-    }
-  }
-  if (result == 0) {
-    outs() << "Unable to find register class for " << MRI.getName(reg) << "!\n";
-    exit(1);
-  }
-  return result;
 }
 
 static uint8_t get_taint_check_mask(MCRegister const &reg,
@@ -531,6 +535,16 @@ public:
       emit_instructions({MCInstBuilder(X86::POPF64)});
     }
     emit_instructions({inst});
+
+    static std::unordered_set<unsigned> const CALL_OPCODES{
+        X86::CALL16r, X86::CALL16m, X86::CALLpcrel16,
+        X86::CALL32r, X86::CALL32m, X86::CALLpcrel32,
+        X86::CALL64r, X86::CALL64m, X86::CALL64pcrel32,
+    };
+
+    static std::unordered_set<unsigned> const RET_OPCODES{
+        X86::RET16, X86::RET32, X86::RET64};
+
     if (std::find(CALL_OPCODES.begin(), CALL_OPCODES.end(), inst.getOpcode()) !=
         CALL_OPCODES.end()) {
 
@@ -598,6 +612,20 @@ public:
         auto subregs = MRI.subregs_inclusive(reg);
         dirty.insert(dirty.end(), subregs.begin(), subregs.end());
         deduplicate_dirty();
+      }
+    } else if (std::find(RET_OPCODES.begin(), RET_OPCODES.end(),
+                         inst.getOpcode()) != RET_OPCODES.end()) {
+      static std::vector<MCRegister> const NONVOLATILE_REGS{
+          X86::RBP, X86::RBX, X86::R12, X86::R13, X86::R14, X86::R15};
+      for (auto const &clean_reg : clean) {
+        for (auto const &nv_reg : NONVOLATILE_REGS) {
+          if (MRI.isSubRegisterEq(nv_reg, clean_reg)) {
+            Ctx.reportWarning(getStartTokLoc(),
+                              Twine("you will clobber ")
+                                  .concat(Twine(MRI.getName(nv_reg)))
+                                  .concat(Twine(".")));
+          }
+        }
       }
     }
   }
