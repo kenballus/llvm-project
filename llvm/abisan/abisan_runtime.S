@@ -61,60 +61,65 @@ __abisan_function_entry:
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_R14], 0xff
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_R15], 0xff
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_RBP], 0xff
-    
 
     ret
 stack_misaligned:
     lea rdi, [rip + __abisan_shadow_stack_pointer]
     call __abisan_fail_stack_misalignment // Must be call to realign stack
 
-
 abisan_function_exit:
-    sub rsp, 0x8 // We never add this back to rsp to make up for the fact that this function is returned into. We'll also use this local space for fnstcw and its ilk
+    sub rsp, 0x10
 
     sub qword ptr [rip + __abisan_shadow_stack_pointer], SHADOW_STACK_FRAME_SIZE
 
-    mov r11, qword ptr [rip + __abisan_shadow_stack_pointer]
+    mov rdi, qword ptr [rip + __abisan_shadow_stack_pointer]
 
     fnstcw [rsp]
-    mov di, word ptr [rsp]
-    cmp di, word ptr [r11 + FRAME_X87CW]
+    mov si, word ptr [rsp]
+    cmp si, word ptr [rdi + FRAME_X87CW]
     jne __abisan_fail_x87cw
 
     stmxcsr dword ptr [rsp]
-    mov edi, dword ptr [rsp]
-    and edi, 0xffe0
-    cmp edi, dword ptr [r11 + FRAME_MXCSR]
+    mov esi, dword ptr [rsp]
+    and esi, 0xffe0
+    cmp esi, dword ptr [rdi + FRAME_MXCSR]
     jne __abisan_fail_mxcsr
 
-    mov di, fs
-    cmp di, word ptr [r11 + FRAME_FS]
+    mov si, fs
+    cmp si, word ptr [rdi + FRAME_FS]
     jne __abisan_fail_fs
 
-    cmp rbx, qword ptr [r11 + FRAME_RBX]
+    mov rsi, rbx
+    cmp rsi, qword ptr [rdi + FRAME_RBX]
     jne __abisan_fail_rbx
-    
-    cmp rbp, qword ptr [r11 + FRAME_RBP]
+
+    mov rsi, rbp
+    cmp rsi, qword ptr [rdi + FRAME_RBP]
     jne __abisan_fail_rbp
-    
-    cmp rsp, qword ptr [r11 + FRAME_RSP]
+
+    lea rsi, [rsp + 8]
+    cmp rsi, qword ptr [rdi + FRAME_RSP]
     jne __abisan_fail_rsp
-    
-    cmp r12, qword ptr [r11 + FRAME_R12]
+
+    mov rsi, r12
+    cmp rsi, qword ptr [rdi + FRAME_R12]
     jne __abisan_fail_r12
-    
-    cmp r13, qword ptr [r11 + FRAME_R13]
+
+    mov rsi, r13
+    cmp rsi, qword ptr [rdi + FRAME_R13]
     jne __abisan_fail_r13
-    
-    cmp r14, qword ptr [r11 + FRAME_R14]
+
+    mov rsi, r14
+    cmp rsi, qword ptr [rdi + FRAME_R14]
     jne __abisan_fail_r14
-    
-    cmp r15, qword ptr [r11 + FRAME_R15]
+
+    mov rsi, r15
+    cmp rsi, qword ptr [rdi + FRAME_R15]
     jne __abisan_fail_r15
 
     // Put the original return address back in place
-    mov rdi, qword ptr [r11 + FRAME_RETADDR]
-    mov [rsp], rdi
+    mov rsi, qword ptr [rdi + FRAME_RETADDR]
+    mov qword ptr [rsp + 8], rsi
 
     // Clobber every register that we're allowed to,
     // except rax and rdx, because they're used for
@@ -146,4 +151,5 @@ abisan_function_exit:
     mov qword ptr [rsp - 0x78], rcx
     mov qword ptr [rsp - 0x80], rcx
 
+    add rsp, 8
     ret
