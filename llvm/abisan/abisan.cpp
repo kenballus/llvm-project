@@ -122,69 +122,38 @@ static unsigned get_register_size(MCRegister const &reg,
     }
   }
   if (result == 0) {
-    outs() << "Unable to find register class for " << MRI.getName(reg) << "!\n";
+    errs() << "Unable to find register class for " << MRI.getName(reg) << "!\n";
     exit(1);
   }
   return result;
 }
 
-static std::vector<MCRegister>
-get_written_registers(MCInst const &inst, MCInstrDesc const &MID,
-                      MCRegisterInfo const &MRI) {
-  // Returns the set of registers that the instruction writes to in a
-  // predictable way. That is, if an instruction writes an indeterminate value
-  // to a register, it should not show up here.
-  std::vector<MCRegister> result;
-  for (unsigned i = 0; i < MID.getNumDefs(); i++) {
-    auto const &op = inst.getOperand(i);
-    if (op.isReg() && op.getReg().isPhysical()) {
-      MCRegister reg = op.getReg();
-      if (get_register_size(reg, MRI) == 32) {
-        // On x86-64, 32-bit writes are zero-extended
-        for (auto const &superreg : MRI.superregs(reg)) {
-          if (get_register_size(superreg, MRI) == 64) {
-            reg = superreg;
-            break;
-          }
-        }
-      }
-      result.push_back(reg);
-    }
-  }
+static std::unordered_set<unsigned> const CALL_OPCODES{
+    X86::CALL16r, X86::CALL16m, X86::CALLpcrel16,
+    X86::CALL32r, X86::CALL32m, X86::CALLpcrel32,
+    X86::CALL64r, X86::CALL64m, X86::CALL64pcrel32,
+};
 
-  // TODO: handle variadic operands
+static std::unordered_set<unsigned> const RET_OPCODES{X86::RET16, X86::RET32,
+                                                      X86::RET64};
 
-  if (inst.getOpcode() == X86::SYSCALL) {
-    result.push_back(X86::RAX);
-  }
+// Nonvolatile registers
+static std::vector<MCRegister> const NONVOLATILE_REGS{
+    X86::RBP, X86::RBX, X86::R12, X86::R13, X86::R14, X86::R15};
 
-  auto const &implicit_defs = MID.implicit_defs();
-  result.insert(result.end(), implicit_defs.begin(), implicit_defs.end());
-  return deduplicate_subregisters(result, MRI);
-}
+// Volatile registers that are not used for return values
+static std::vector<MCRegister> const CALL_CLOBBERED_REGS{
+    X86::RDI, X86::RSI, X86::RCX, X86::R8, X86::R9, X86::R10, X86::R11};
 
-static std::vector<MCRegister> get_read_registers(MCInst const &inst,
-                                                  MCInstrDesc const &MID,
-                                                  MCRegisterInfo const &MRI) {
-  std::vector<MCRegister> result;
-  for (unsigned i = MID.getNumDefs(); i < MID.getNumOperands(); i++) {
-    auto const &op = inst.getOperand(i);
-    if (op.isReg() && op.getReg().isPhysical()) {
-      result.push_back(op.getReg());
-    }
-  }
+// Registers that are clobbered by a syscall
+static std::vector<MCRegister> const SYSCALL_CLOBBERED_REGS{X86::RCX, X86::R11};
 
-  // TODO: handle variadic operands
+// Registers that are never used for any form of argument passing
+static std::vector<MCRegister> const NON_ARGUMENT_REGS{
+    X86::R11, X86::R12, X86::R13, X86::R14, X86::R15, X86::RBP, X86::RBX};
 
-  auto const &implicit_uses = MID.implicit_uses();
-  result.insert(result.end(), implicit_uses.begin(), implicit_uses.end());
-  if (inst.getOpcode() == X86::SYSCALL) {
-    result.push_back(X86::RAX);
-    // TODO: Check the syscall number and check more args conditionally
-  }
-
-  return deduplicate_subregisters(result, MRI);
-}
+// Registers that are used for return values
+static std::vector<MCRegister> const RETVAL_REGS{X86::RAX, X86::RDX};
 
 static bool reg_is_taint_checked(MCRegister const &reg,
                                  MCRegisterInfo const &MRI,
@@ -208,8 +177,121 @@ static bool reg_is_taint_checked(MCRegister const &reg,
   return false;
 }
 
-static bool inst_is_taint_checked(MCInst const &inst, MCInstrDesc const &MID,
-                                  MCRegisterInfo const &MRI) {
+static std::vector<MCRegister>
+get_cleaned_registers(MCInst const &inst, MCInstrDesc const &MID,
+                      MCRegisterInfo const &MRI) {
+  // The registers that are cleaned as a result of this instruction.
+  std::vector<MCRegister> written_registers;
+  for (unsigned i = 0; i < MID.getNumDefs(); i++) {
+    auto const &op = inst.getOperand(i);
+    if (op.isReg() && op.getReg().isPhysical()) {
+      MCRegister reg = op.getReg();
+      if (get_register_size(reg, MRI) == 32) {
+        // On x86-64, 32-bit writes are zero-extended
+        for (auto const &superreg : MRI.superregs(reg)) {
+          if (get_register_size(superreg, MRI) == 64) {
+            reg = superreg;
+            break;
+          }
+        }
+      }
+      written_registers.push_back(reg);
+    }
+  }
+
+  if (inst.getOpcode() == X86::SYSCALL) {
+    written_registers.push_back(X86::RAX);
+  }
+
+  auto const &implicit_defs = MID.implicit_defs();
+  written_registers.insert(written_registers.end(), implicit_defs.begin(),
+                           implicit_defs.end());
+
+  std::vector<MCRegister> result;
+  for (auto const &reg : written_registers) {
+    if (reg_is_taint_checked(reg, MRI, {})) {
+      result.push_back(reg);
+    }
+  }
+
+  return deduplicate_subregisters(result, MRI);
+}
+
+static std::vector<MCRegister>
+get_undirtied_registers(MCInst const &inst, MCInstrDesc const &MID,
+                        MCRegisterInfo const &MRI) {
+  // The registers that are untainted as a result of this instruction.
+  // Note that this is not the same as being cleaned; it just means if
+  // we were previously certain that this register is dirty, we aren't
+  // any longer after this instruction.
+  unsigned const opcode = inst.getOpcode();
+  std::vector<MCRegister> result = get_cleaned_registers(inst, MID, MRI);
+  if (std::find(CALL_OPCODES.begin(), CALL_OPCODES.end(), opcode) !=
+      CALL_OPCODES.end()) {
+    for (auto const &reg : RETVAL_REGS) {
+      auto subregs = MRI.subregs_inclusive(reg);
+      result.insert(result.end(), subregs.begin(), subregs.end());
+    }
+  }
+  return result;
+}
+
+static std::vector<MCRegister> get_tainted_registers(MCInst const &inst) {
+  // The registers that are tainted as a result of this instruction.
+  unsigned const opcode = inst.getOpcode();
+  std::vector<MCRegister> result;
+  if (opcode == X86::SYSCALL) {
+    result = SYSCALL_CLOBBERED_REGS;
+  } else if (std::find(CALL_OPCODES.begin(), CALL_OPCODES.end(), opcode) !=
+             CALL_OPCODES.end()) {
+    result = CALL_CLOBBERED_REGS;
+  }
+  return result;
+}
+
+static std::vector<MCRegister>
+get_dirtied_registers(MCInst const &inst, MCRegisterInfo const &MRI) {
+  // The registers that are dirtied as a result of this instruction.
+  std::vector<MCRegister> result;
+  for (auto const &reg : get_tainted_registers(inst)) {
+    auto subregs = MRI.subregs_inclusive(reg);
+    result.insert(result.end(), subregs.begin(), subregs.end());
+  }
+  return result;
+}
+
+static std::vector<MCRegister>
+get_required_clean_registers(MCInst const &inst, MCInstrDesc const &MID,
+                             MCRegisterInfo const &MRI) {
+  // Returns the registers that must be clean for this instruction to execute.
+  std::vector<MCRegister> read_registers;
+  for (unsigned i = MID.getNumDefs(); i < MID.getNumOperands(); i++) {
+    auto const &op = inst.getOperand(i);
+    if (op.isReg() && op.getReg().isPhysical()) {
+      read_registers.push_back(op.getReg());
+    }
+  }
+
+  auto const &implicit_uses = MID.implicit_uses();
+  read_registers.insert(read_registers.end(), implicit_uses.begin(),
+                        implicit_uses.end());
+  if (inst.getOpcode() == X86::SYSCALL) {
+    read_registers.push_back(X86::EAX);
+    // TODO: Check the syscall number and check more args conditionally
+  }
+
+  std::vector<MCRegister> result;
+  for (auto const &reg : read_registers) {
+    if (reg_is_taint_checked(reg, MRI, {})) {
+      result.push_back(reg);
+    }
+  }
+
+  return deduplicate_subregisters(result, MRI);
+}
+
+static bool inst_needs_taint_check(MCInst const &inst, MCInstrDesc const &MID,
+                                   MCRegisterInfo const &MRI) {
   static std::unordered_set<unsigned> const TAINT_UNCHECKED_OPCODES{
       X86::PUSH16i,   X86::PUSH16i8, X86::PUSH16r,   X86::PUSH16rmm,
       X86::PUSH16rmr, X86::PUSH2,    X86::PUSH2P,    X86::PUSH32i,
@@ -230,7 +312,7 @@ static bool inst_is_taint_checked(MCInst const &inst, MCInstrDesc const &MID,
   };
   unsigned const opcode = inst.getOpcode();
   if (XOR_RR_OPCODES.find(opcode) != XOR_RR_OPCODES.end() &&
-      get_read_registers(inst, MID, MRI).size() == 1) {
+      get_required_clean_registers(inst, MID, MRI).size() == 1) {
     // xor $x, $x
     return false;
   }
@@ -257,7 +339,7 @@ static uint8_t get_taint_check_mask(MCRegister const &reg,
   case 64:
     return 0xff;
   }
-  outs() << "Invalid register passed to get_taint_mask.\n";
+  errs() << "Invalid register passed to get_taint_mask.\n";
   exit(1);
 }
 
@@ -279,7 +361,7 @@ static uint8_t get_taint_state_index(MCRegister const &reg,
       }
     }
     if (!found) {
-      outs() << "Couldn't find superreg for " << MRI.getName(reg)
+      errs() << "Couldn't find superreg for " << MRI.getName(reg)
              << " in get_taint_state_index!\n";
       exit(1);
     }
@@ -317,7 +399,8 @@ static uint8_t get_taint_state_index(MCRegister const &reg,
     return TAINT_STATE_RBP;
   }
 
-  outs() << "Superreg found, but not taint-checked in get_taint_state_index!\n";
+  errs() << "Superreg " << MRI.getName(main_register)
+         << " found, but not taint-checked in get_taint_state_index!\n";
   exit(1);
 }
 
@@ -355,6 +438,143 @@ class ABISanStreamer : public MCAsmStreamer {
     }
   }
 
+  void emit_entry_call() {
+    MCContext &Ctx = getContext();
+    emit_instructions(
+        {MCInstBuilder(X86::CALL64pcrel32)
+             .addExpr(MCSymbolRefExpr::create(
+                 Ctx.getOrCreateSymbol("__abisan_function_entry"), Ctx))});
+  }
+
+  void emit_taint_check_prologue() {
+    emit_instructions({
+        // push rbp
+        MCInstBuilder(X86::PUSH64r).addReg(X86::RBP),
+        // mov rbp, rsp
+        MCInstBuilder(X86::MOV64rr).addReg(X86::RBP).addReg(X86::RSP),
+        // and rsp, 0xfffffffffffffff0
+        MCInstBuilder(X86::AND64ri8)
+            .addReg(X86::RSP)
+            .addReg(X86::RSP)
+            .addImm(0xfffffffffffffff0ull),
+        // push rax
+        MCInstBuilder(X86::PUSH64r).addReg(X86::RAX),
+    });
+  }
+
+  void emit_taint_check(MCRegister const &reg) {
+    MCContext &Ctx = getContext();
+    MCRegisterInfo const &MRI = *Ctx.getRegisterInfo();
+    uint8_t const taint_check_mask = get_taint_check_mask(reg, MRI);
+    if (taint_check_mask == 0xff) {
+      emit_instructions({
+          // cmp byte ptr [rip + __abisan_taint_state +
+          // TAINT_STATE_$REG], 0
+          MCInstBuilder(X86::CMP8mi)
+              .addReg(X86::RIP)
+              .addImm(1 /* scale */)
+              .addReg(0 /* index */)
+              .addExpr(MCBinaryExpr::createAdd(
+                  MCSymbolRefExpr::create(
+                      Ctx.getOrCreateSymbol("__abisan_taint_state"), Ctx),
+                  MCConstantExpr::create(get_taint_state_index(reg, MRI), Ctx),
+                  Ctx))
+              .addReg(0 /* segment register */)
+              .addImm(0),
+          // jne __abisan_fail_taint_$REG
+          MCInstBuilder(X86::JCC_1)
+              .addExpr(MCSymbolRefExpr::create(
+                  Ctx.getOrCreateSymbol(get_fail_taint_symbol(reg, MRI)), Ctx))
+              .addImm(X86::COND_NE),
+      });
+    } else {
+      emit_instructions({
+          // mov al, byte ptr [rip + __abisan_taint_state +
+          // TAINT_STATE_$REG]
+          MCInstBuilder(X86::MOV8rm)
+              .addReg(X86::AL)
+              .addReg(X86::RIP)
+              .addImm(1 /* scale */)
+              .addReg(0 /* index */)
+              .addExpr(MCBinaryExpr::createAdd(
+                  MCSymbolRefExpr::create(
+                      Ctx.getOrCreateSymbol("__abisan_taint_state"), Ctx),
+                  MCConstantExpr::create(get_taint_state_index(reg, MRI), Ctx),
+                  Ctx))
+              .addReg(0 /* segment register */),
+          // and al, TAINT_MASK($REG)
+          MCInstBuilder(X86::AND8ri)
+              .addReg(X86::AL)
+              .addReg(X86::AL)
+              .addImm(taint_check_mask),
+          // cmp al, 0
+          MCInstBuilder(X86::CMP8ri).addReg(X86::AL).addImm(0),
+          // jne __abisan_fail_taint_$REG
+          MCInstBuilder(X86::JCC_1)
+              .addExpr(MCSymbolRefExpr::create(
+                  Ctx.getOrCreateSymbol(get_fail_taint_symbol(reg, MRI)), Ctx))
+              .addImm(X86::COND_NE),
+      });
+    }
+  }
+
+  void emit_taint_check_epilogue() {
+    emit_instructions({
+        // pop rax
+        MCInstBuilder(X86::POP64r).addReg(X86::RAX),
+        // leave
+        MCInstBuilder(X86::LEAVE),
+    });
+  }
+
+  void emit_taint_clear(MCRegister const &reg) {
+    MCContext &Ctx = getContext();
+    MCRegisterInfo const &MRI = *Ctx.getRegisterInfo();
+
+    emit_instructions(
+        {// and byte ptr [rip + __abisan_taint_state + TAINT_STATE_$REG],
+         // ~TAINT_MASK($REG)
+         MCInstBuilder(X86::AND8mi)
+             .addReg(X86::RIP)
+             .addImm(1 /* scale */)
+             .addReg(0 /* index */)
+             .addExpr(MCBinaryExpr::createAdd(
+                 MCSymbolRefExpr::create(
+                     Ctx.getOrCreateSymbol("__abisan_taint_state"), Ctx),
+                 MCConstantExpr::create(get_taint_state_index(reg, MRI), Ctx),
+                 Ctx))
+             .addReg(0 /* segment register */)
+             .addImm(get_taint_clear_mask(reg, MRI))});
+  }
+
+  void emit_taint_prologue() {
+    emit_instructions({
+        // pushfq
+        MCInstBuilder(X86::PUSHF64),
+    });
+  }
+
+  void emit_taint_epilogue() {
+    emit_instructions({MCInstBuilder(X86::POPF64)});
+  }
+
+  void emit_taint_set(MCRegister const &reg) {
+    MCContext &Ctx = getContext();
+    MCRegisterInfo const &MRI = *Ctx.getRegisterInfo();
+    emit_instructions(
+        {MCInstBuilder(X86::MOV8mi)
+             .addReg(X86::RIP)
+             .addImm(1 /* scale */)
+             .addReg(0 /* index */)
+             .addExpr(MCBinaryExpr::createAdd(
+                 MCSymbolRefExpr::create(
+                     Ctx.getOrCreateSymbol("__abisan_taint_state"), Ctx),
+                 MCConstantExpr::create(get_taint_state_index(reg, MRI), Ctx),
+                 Ctx))
+             .addReg(0 /* segment register */)
+             .addImm(0xff)});
+  }
+
 public:
   ABISanStreamer(MCContext &Context, std::unique_ptr<formatted_raw_ostream> os,
                  std::unique_ptr<MCInstPrinter> printer,
@@ -371,252 +591,79 @@ public:
     MCRegisterInfo const &MRI = *Ctx.getRegisterInfo();
     MCInstrDesc const &MID = MCII.get(inst.getOpcode());
 
-    bool have_affected_flags = false;
-    for (auto const &reg : get_read_registers(inst, MID, MRI)) {
-      if (inst_is_taint_checked(inst, MID, MRI) &&
+    bool have_emitted_instrumentation = false;
+    for (auto const &reg : get_required_clean_registers(inst, MID, MRI)) {
+      if (inst_needs_taint_check(inst, MID, MRI) &&
           reg_is_taint_checked(reg, MRI, clean)) {
+        // If this register is statically known to be dirty, issue a warning
         if (std::find(dirty.begin(), dirty.end(), reg) != dirty.end()) {
           Ctx.reportWarning(getStartTokLoc(),
                             Twine("you will access a tainted ")
                                 .concat(Twine(MRI.getName(reg)))
                                 .concat(Twine(".")));
         }
-        if (!have_affected_flags) {
-          emit_instructions({
-              // pushfq
-              MCInstBuilder(X86::PUSHF64),
-              // push rbp
-              MCInstBuilder(X86::PUSH64r).addReg(X86::RBP),
-              // mov rbp, rsp
-              MCInstBuilder(X86::MOV64rr).addReg(X86::RBP).addReg(X86::RSP),
-              // and rsp, 0xfffffffffffffff0
-              MCInstBuilder(X86::AND64ri8)
-                  .addReg(X86::RSP)
-                  .addReg(X86::RSP)
-                  .addImm(0xfffffffffffffff0ull),
-              // push rax
-              MCInstBuilder(X86::PUSH64r).addReg(X86::RAX),
-          });
-          have_affected_flags = true;
+        if (!have_emitted_instrumentation) {
+          emit_taint_prologue();
+          emit_taint_check_prologue();
+          have_emitted_instrumentation = true;
         }
 
-        uint8_t const taint_check_mask = get_taint_check_mask(reg, MRI);
-        if (taint_check_mask == 0xff) {
-          emit_instructions({
-              // cmp byte ptr [rip + __abisan_taint_state +
-              // TAINT_STATE_$REG], 0
-              MCInstBuilder(X86::CMP8mi)
-                  .addReg(X86::RIP)
-                  .addImm(1 /* scale */)
-                  .addReg(0 /* index */)
-                  .addExpr(MCBinaryExpr::createAdd(
-                      MCSymbolRefExpr::create(
-                          Ctx.getOrCreateSymbol("__abisan_taint_state"), Ctx),
-                      MCConstantExpr::create(get_taint_state_index(reg, MRI),
-                                             Ctx),
-                      Ctx))
-                  .addReg(0 /* segment register */)
-                  .addImm(0),
-              // jne __abisan_fail_taint_$REG
-              MCInstBuilder(X86::JCC_1)
-                  .addExpr(MCSymbolRefExpr::create(
-                      Ctx.getOrCreateSymbol(get_fail_taint_symbol(reg, MRI)),
-                      Ctx))
-                  .addImm(X86::COND_NE),
-          });
-        } else {
-          emit_instructions({
-              // mov al, byte ptr [rip + __abisan_taint_state +
-              // TAINT_STATE_$REG]
-              MCInstBuilder(X86::MOV8rm)
-                  .addReg(X86::AL)
-                  .addReg(X86::RIP)
-                  .addImm(1 /* scale */)
-                  .addReg(0 /* index */)
-                  .addExpr(MCBinaryExpr::createAdd(
-                      MCSymbolRefExpr::create(
-                          Ctx.getOrCreateSymbol("__abisan_taint_state"), Ctx),
-                      MCConstantExpr::create(get_taint_state_index(reg, MRI),
-                                             Ctx),
-                      Ctx))
-                  .addReg(0 /* segment register */),
-              // and al, TAINT_MASK($REG)
-              MCInstBuilder(X86::AND8ri)
-                  .addReg(X86::AL)
-                  .addReg(X86::AL)
-                  .addImm(taint_check_mask),
-              // cmp al, 0
-              MCInstBuilder(X86::CMP8ri).addReg(X86::AL).addImm(0),
-              // jne __abisan_fail_taint_$REG
-              MCInstBuilder(X86::JCC_1)
-                  .addExpr(MCSymbolRefExpr::create(
-                      Ctx.getOrCreateSymbol(get_fail_taint_symbol(reg, MRI)),
-                      Ctx))
-                  .addImm(X86::COND_NE),
-          });
-        }
+        emit_taint_check(reg);
       }
     }
 
-    if (have_affected_flags) {
-      emit_instructions({
-          // pop rax
-          MCInstBuilder(X86::POP64r).addReg(X86::RAX),
-          // leave
-          MCInstBuilder(X86::LEAVE),
-      });
+    if (have_emitted_instrumentation) {
+      emit_taint_check_epilogue();
     }
 
-    for (auto const &reg : get_written_registers(inst, MID, MRI)) {
-      if (reg_is_taint_checked(reg, MRI, {})) {
-        uint8_t taint_clear_mask = get_taint_clear_mask(reg, MRI);
-
-        if (!have_affected_flags && taint_clear_mask != 0) {
-          emit_instructions({MCInstBuilder(X86::PUSHF64)});
-          have_affected_flags = true;
-        }
-
-        if (taint_clear_mask == 0) {
-          emit_instructions(
-              {// mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_$REG],
-               // 0
-               MCInstBuilder(X86::MOV8mi)
-                   .addReg(X86::RIP)
-                   .addImm(1 /* scale */)
-                   .addReg(0 /* index */)
-                   .addExpr(MCBinaryExpr::createAdd(
-                       MCSymbolRefExpr::create(
-                           Ctx.getOrCreateSymbol("__abisan_taint_state"), Ctx),
-                       MCConstantExpr::create(get_taint_state_index(reg, MRI),
-                                              Ctx),
-                       Ctx))
-                   .addReg(0 /* segment register */)
-                   .addImm(0)});
-        } else {
-          emit_instructions(
-              {// and byte ptr [rip + __abisan_taint_state + TAINT_STATE_$REG],
-               // ~TAINT_MASK($REG)
-               MCInstBuilder(X86::AND8mi)
-                   .addReg(X86::RIP)
-                   .addImm(1 /* scale */)
-                   .addReg(0 /* index */)
-                   .addExpr(MCBinaryExpr::createAdd(
-                       MCSymbolRefExpr::create(
-                           Ctx.getOrCreateSymbol("__abisan_taint_state"), Ctx),
-                       MCConstantExpr::create(get_taint_state_index(reg, MRI),
-                                              Ctx),
-                       Ctx))
-                   .addReg(0 /* segment register */)
-                   .addImm(get_taint_clear_mask(reg, MRI))});
-        }
-
-        clean.push_back(reg);
-        deduplicate_clean();
-
-        // Since we just added reg to clean, we need to remove it and its
-        // subregisters from dirty.
-        while (true) {
-          bool got_one = false;
-          for (auto it = dirty.begin(); it != dirty.end(); it++) {
-            if (MRI.isSubRegisterEq(reg, *it)) {
-              dirty.erase(it);
-              got_one = true;
-              break;
-            }
-          }
-          if (!got_one) {
-            break;
-          }
-        }
+    for (auto const &reg : get_cleaned_registers(inst, MID, MRI)) {
+      if (!have_emitted_instrumentation) {
+        emit_taint_prologue();
+        have_emitted_instrumentation = true;
       }
+
+      emit_taint_clear(reg);
+    }
+    if (have_emitted_instrumentation) {
+      emit_taint_epilogue();
     }
 
-    if (have_affected_flags) {
-      emit_instructions({MCInstBuilder(X86::POPF64)});
-    }
     emit_instructions({inst});
 
-    static std::unordered_set<unsigned> const CALL_OPCODES{
-        X86::CALL16r, X86::CALL16m, X86::CALLpcrel16,
-        X86::CALL32r, X86::CALL32m, X86::CALLpcrel32,
-        X86::CALL64r, X86::CALL64m, X86::CALL64pcrel32,
-    };
-
-    static std::unordered_set<unsigned> const RET_OPCODES{
-        X86::RET16, X86::RET32, X86::RET64};
-
-    if (std::find(CALL_OPCODES.begin(), CALL_OPCODES.end(), inst.getOpcode()) !=
-        CALL_OPCODES.end()) {
-
-      // Remove retval registers from dirty.
-      // Note that we don't mark them as clean because that's not known.
-      // If we're calling an instrumented function, then the taint state should
-      // already be correct. If we're calling an uninstrumented function, we
-      // probably need to just mark these as clean.
-      // TODO: Implement this distinction instead of assuming that every call is
-      // instrumented.
-      static std::vector<MCRegister> const RETVAL_REGS{X86::RAX, X86::RDX};
-      for (auto const &reg : RETVAL_REGS) {
-        for (auto const &subreg : MRI.subregs_inclusive(reg)) {
-          auto the_find = std::find(dirty.begin(), dirty.end(), subreg);
-          if (the_find != dirty.end()) {
-            dirty.erase(the_find);
-          }
-        }
+    // Remove the undirtied registers from dirty
+    for (auto const &reg : get_undirtied_registers(inst, MID, MRI)) {
+      auto the_find = std::find(dirty.begin(), dirty.end(), reg);
+      if (the_find != dirty.end()) {
+        dirty.erase(the_find);
       }
+    }
 
-      static std::vector<MCRegister> const NON_RETVAL_VOLATILE_REGS{
-          X86::RDI, X86::RSI, X86::RCX, X86::R8,
-          X86::R9,  X86::R10, X86::R11}; // RAX, RDX excluded because they might
-                                         // be used for return values
-      // Taint every volatile register that isn't used for return values.
-      for (auto const &reg : NON_RETVAL_VOLATILE_REGS) {
-        emit_instructions(
-            {MCInstBuilder(X86::MOV8mi)
-                 .addReg(X86::RIP)
-                 .addImm(1 /* scale */)
-                 .addReg(0 /* index */)
-                 .addExpr(MCBinaryExpr::createAdd(
-                     MCSymbolRefExpr::create(
-                         Ctx.getOrCreateSymbol("__abisan_taint_state"), Ctx),
-                     MCConstantExpr::create(get_taint_state_index(reg, MRI),
-                                            Ctx),
-                     Ctx))
-                 .addReg(0 /* segment register */)
-                 .addImm(0xff)});
+    // Mark the cleaned registers as clean
+    auto const &cleaned_regs = get_cleaned_registers(inst, MID, MRI);
+    clean.insert(clean.end(), cleaned_regs.begin(), cleaned_regs.end());
+    deduplicate_clean();
+
+    // Mark the dirtied registers as dirty
+    auto const &dirtied_regs = get_dirtied_registers(inst, MRI);
+    dirty.insert(dirty.end(), dirtied_regs.begin(), dirtied_regs.end());
+    deduplicate_dirty();
+
+    // Emit taint instructions for each tainted register
+    // This needs to happen after the instruction is emitted because it won't
+    // work for call otherwise.
+    for (auto const &tainted_reg : get_tainted_registers(inst)) {
+      if (get_taint_clear_mask(tainted_reg, MRI) != 0) {
+        errs() << "All tainted registers must be full width. This should never "
+                  "happen.\n";
+        exit(1);
       }
-      // Dirty every volatile register that isn't used for return values.
-      for (auto const &volatile_reg : NON_RETVAL_VOLATILE_REGS) {
-        auto subregs = MRI.subregs_inclusive(volatile_reg);
-        dirty.insert(dirty.end(), subregs.begin(), subregs.end());
-      }
-      deduplicate_dirty();
-    } else if (inst.getOpcode() == X86::SYSCALL) {
-      // syscall taints RCX and R11
-      for (auto const &reg : {X86::RCX, X86::R11}) {
-        // Taint the register
-        emit_instructions(
-            {MCInstBuilder(X86::MOV8mi)
-                 .addReg(X86::RIP)
-                 .addImm(1 /* scale */)
-                 .addReg(0 /* index */)
-                 .addExpr(MCBinaryExpr::createAdd(
-                     MCSymbolRefExpr::create(
-                         Ctx.getOrCreateSymbol("__abisan_taint_state"), Ctx),
-                     MCConstantExpr::create(get_taint_state_index(reg, MRI),
-                                            Ctx),
-                     Ctx))
-                 .addReg(0 /* segment register */)
-                 .addImm(0xff)});
-        // Mark the register and its subregisters as dirty.
-        auto subregs = MRI.subregs_inclusive(reg);
-        dirty.insert(dirty.end(), subregs.begin(), subregs.end());
-        deduplicate_dirty();
-      }
-    } else if (std::find(RET_OPCODES.begin(), RET_OPCODES.end(),
-                         inst.getOpcode()) != RET_OPCODES.end()) {
-      static std::vector<MCRegister> const NONVOLATILE_REGS{
-          X86::RBP, X86::RBX, X86::R12, X86::R13, X86::R14, X86::R15};
+      emit_taint_set(tainted_reg);
+    }
+
+    // If the instruction is a ret, and any nonvolatile register is clean, issue
+    // a warning
+    if (std::find(RET_OPCODES.begin(), RET_OPCODES.end(), inst.getOpcode()) !=
+        RET_OPCODES.end()) {
       for (auto const &clean_reg : clean) {
         for (auto const &nv_reg : NONVOLATILE_REGS) {
           if (MRI.isSubRegisterEq(nv_reg, clean_reg)) {
@@ -641,8 +688,7 @@ public:
         MCRegisterInfo const &MRI = *getContext().getRegisterInfo();
         // Mark the non-arg registers as dirty.
         // The corresponding tainting happens in __abisan_function_entry
-        for (auto const &non_arg_reg : {X86::R11, X86::R12, X86::R13, X86::R14,
-                                        X86::R15, X86::RBP, X86::RBX}) {
+        for (auto const &non_arg_reg : NON_ARGUMENT_REGS) {
           auto subregs = MRI.subregs_inclusive(non_arg_reg);
           dirty.insert(dirty.end(), subregs.begin(), subregs.end());
         }
@@ -654,11 +700,7 @@ public:
         // they'll be used.
 
         // call __abisan_function_entry
-        emit_instructions(
-            {MCInstBuilder(X86::CALL64pcrel32)
-                 .addExpr(MCSymbolRefExpr::create(
-                     getContext().getOrCreateSymbol("__abisan_function_entry"),
-                     getContext()))});
+        emit_entry_call();
         return;
       }
     }
@@ -669,7 +711,7 @@ static std::unique_ptr<SourceMgr> make_sm(char const *const filename) {
   std::unique_ptr<SourceMgr> SM = std::make_unique<SourceMgr>();
   auto buffer_or_error = MemoryBuffer::getFile(filename);
   if (!buffer_or_error) {
-    outs() << "Error reading file: " << filename << "\n";
+    errs() << "Error reading file: " << filename << "\n";
     exit(1);
   }
 
@@ -685,7 +727,7 @@ static std::unique_ptr<MCObjectFileInfo const> make_mofi(MCContext &Ctx) {
 
 int main(int const argc, char const *const *const argv) {
   if (argc < 2) {
-    outs() << "Usage: " << argv[0] << " <file.s>\n";
+    errs() << "Usage: " << argv[0] << " <file.s>\n";
     exit(1);
   }
 
@@ -701,7 +743,7 @@ int main(int const argc, char const *const *const argv) {
   Target const *const Target = TargetRegistry::lookupTarget(triple_name, error);
 
   if (!Target) {
-    outs() << "Failed to lookup target: " << error << "\n";
+    errs() << "Failed to lookup target: " << error << "\n";
     exit(1);
   }
 
@@ -737,12 +779,12 @@ int main(int const argc, char const *const *const argv) {
   std::unique_ptr<MCTargetAsmParser> FPTargetParser(
       Target->createMCAsmParser(*STI, *FPParser, *MCII, options));
   if (!FPTargetParser) {
-    outs() << "No target-specific asm parser for triple!\n";
+    errs() << "No target-specific asm parser for triple!\n";
     exit(1);
   }
   FPParser->setTargetParser(*FPTargetParser);
   if (FPParser->Run(false)) {
-    outs() << "Failed to parse assembly.\n";
+    errs() << "Failed to parse assembly.\n";
     exit(1);
   }
 
@@ -769,12 +811,12 @@ int main(int const argc, char const *const *const argv) {
   std::unique_ptr<MCTargetAsmParser> TargetParser(
       Target->createMCAsmParser(*STI, *Parser, *MCII, options));
   if (!TargetParser) {
-    outs() << "No target-specific asm parser for triple!\n";
+    errs() << "No target-specific asm parser for triple!\n";
     exit(1);
   }
   Parser->setTargetParser(*TargetParser);
   if (Parser->Run(false)) {
-    outs() << "Failed to parse assembly.\n";
+    errs() << "Failed to parse assembly.\n";
     exit(1);
   }
 }
