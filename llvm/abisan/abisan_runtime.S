@@ -46,15 +46,22 @@ __abisan_function_entry:
     add qword ptr [rip + __abisan_shadow_stack_pointer], SHADOW_STACK_FRAME_SIZE
 
     lea r11, [rip + __abisan_taint_state]
+    mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_RAX], 0
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_RBX], 0xff
-    mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_R10], 0xff
+    mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_RCX], 0
+    mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_RDX], 0
+    mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_RDI], 0
+    mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_RSI], 0
+    mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_R8], 0
+    mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_R9], 0
+    mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_R10], 0
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_R11], 0xff
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_R12], 0xff
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_R13], 0xff
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_R14], 0xff
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_R15], 0xff
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_RBP], 0xff
-    // Argument registers should be updated after every call, not here
+    
 
     ret
 stack_misaligned:
