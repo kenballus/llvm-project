@@ -406,13 +406,17 @@ static uint8_t get_taint_state_index(MCRegister const &reg,
   exit(1);
 }
 
-static std::string get_fail_taint_symbol(MCRegister const &reg,
-                                         MCRegisterInfo const &MRI) {
-  std::string result("__abisan_fail_taint_");
-  for (auto const &c : std::string(MRI.getName(reg))) {
+static std::string to_lower(std::string const s) {
+  std::string result;
+  for (auto const c : s) {
     result.push_back(std::tolower(c));
   }
   return result;
+}
+
+static std::string get_fail_taint_symbol(MCRegister const &reg,
+                                         MCRegisterInfo const &MRI) {
+  return std::string("__abisan_fail_taint_") + to_lower(MRI.getName(reg));
 }
 
 class ABISanStreamer : public MCAsmStreamer {
@@ -609,10 +613,15 @@ public:
     bool have_emitted_instrumentation = false;
     for (auto const &reg : get_required_clean_registers(inst, MID, MRI)) {
       if (reg_is_taint_checked(reg, MRI)) {
+        bool is_clean = false;
         for (auto const &clean_reg : clean.keys()) {
           if (MRI.isSubRegisterEq(clean_reg, reg)) {
-            continue; // this register is clean; no check required.
+            is_clean = true;
+            break;
           }
+        }
+        if (is_clean) {
+          continue; // this register is known to be clean; no check required.
         }
 
         // If this register is statically known to be dirty, issue a warning
@@ -692,9 +701,10 @@ public:
       for (auto const &[clean_reg, loc] : clean) {
         for (auto const &nv_reg : NONVOLATILE_REGS) {
           if (MRI.isSubRegisterEq(nv_reg, clean_reg)) {
-            Ctx.reportWarning(loc, Twine("this instruction might clobber ")
-                                       .concat(Twine(MRI.getName(nv_reg)))
-                                       .concat(Twine(".")));
+            Ctx.reportWarning(loc,
+                              Twine("this instruction might clobber ")
+                                  .concat(Twine(to_lower(MRI.getName(nv_reg))))
+                                  .concat(Twine(".")));
           }
         }
       }
