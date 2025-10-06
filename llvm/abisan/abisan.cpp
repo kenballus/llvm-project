@@ -38,7 +38,8 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/TargetParser/Host.h"
-#include <cctype> // for std::tolower
+#include <cctype>  // for std::tolower
+#include <utility> // for std::make_pair
 #include <vector>
 
 using namespace llvm;
@@ -135,18 +136,11 @@ static DenseSet<MCRegister> const NON_ARGUMENT_REGS{
 static DenseSet<MCRegister> const RETVAL_REGS{X86::RAX, X86::RDX};
 
 static bool reg_is_taint_checked(MCRegister const &reg,
-                                 MCRegisterInfo const &MRI,
-                                 DenseSet<MCRegister> const &excluded) {
+                                 MCRegisterInfo const &MRI) {
   static DenseSet<MCRegister> const TAINT_CHECKED_REGISTERS{
       X86::RAX, X86::RBX, X86::RCX, X86::RDX, X86::RDI,
       X86::RSI, X86::R8,  X86::R9,  X86::R10, X86::R11,
       X86::R12, X86::R13, X86::R14, X86::R15, X86::RBP};
-
-  for (auto const &clean_reg : excluded) {
-    if (MRI.isSubRegisterEq(clean_reg, reg)) {
-      return false;
-    }
-  }
 
   for (auto const &checked_reg : TAINT_CHECKED_REGISTERS) {
     if (MRI.isSubRegisterEq(checked_reg, reg)) {
@@ -213,7 +207,7 @@ static DenseSet<MCRegister> get_uncleaned_registers(MCInst const &inst,
   DenseSet<MCRegister> result(get_tainted_registers(inst));
   if (POP_OPCODES.contains(inst.getOpcode())) {
     for (auto const &pop_operand : get_written_registers(inst, MID, MRI)) {
-      if (reg_is_taint_checked(pop_operand, MRI, {})) {
+      if (reg_is_taint_checked(pop_operand, MRI)) {
         result.insert(pop_operand);
       }
     }
@@ -228,7 +222,7 @@ static DenseSet<MCRegister> get_cleaned_registers(MCInst const &inst,
 
   DenseSet<MCRegister> result;
   for (auto const &reg : get_written_registers(inst, MID, MRI)) {
-    if (reg_is_taint_checked(reg, MRI, {})) {
+    if (reg_is_taint_checked(reg, MRI)) {
       result.insert(reg);
     }
   }
@@ -320,7 +314,7 @@ get_required_clean_registers(MCInst const &inst, MCInstrDesc const &MID,
 
   DenseSet<MCRegister> result;
   for (auto const &reg : read_registers) {
-    if (reg_is_taint_checked(reg, MRI, {})) {
+    if (reg_is_taint_checked(reg, MRI)) {
       result.insert(reg);
     }
   }
@@ -427,13 +421,30 @@ class ABISanStreamer : public MCAsmStreamer {
   MCInstrInfo const &MCII;
   MCSubtargetInfo const &STI;
   DenseSet<MCSymbol *> const &instrumented_symbols;
-  DenseSet<MCRegister> clean; // Registers statically known to be clean. If X is
-                              // clean, it is implied that X's subregs are too.
+  DenseMap<MCRegister, SMLoc>
+      clean; // Registers statically known to be clean. If X is
+             // clean, it is implied that X's subregs are too.
+             // Mapped to SMLoc that the register was marked clean.
   DenseSet<MCRegister> dirty; // Registers statically known to be dirty. If X is
                               // dirty, it is possible that X's subregs are not.
 
   void deduplicate_clean() {
-    clean = deduplicate_subregisters(clean, *getContext().getRegisterInfo());
+    MCRegisterInfo const &MRI = *getContext().getRegisterInfo();
+    DenseMap<MCRegister, SMLoc> result;
+    for (auto const &[r1, loc] : clean) {
+      bool is_sub = false;
+      for (auto const &[r2, _] : clean) {
+        if (MRI.isSubRegister(r2, r1)) {
+          is_sub = true;
+          break;
+        }
+      }
+      if (!is_sub) {
+        result.insert(std::make_pair(r1, loc));
+      }
+    }
+
+    clean = result;
   }
 
   void emit_instructions(std::vector<MCInst> insts) {
@@ -597,13 +608,20 @@ public:
 
     bool have_emitted_instrumentation = false;
     for (auto const &reg : get_required_clean_registers(inst, MID, MRI)) {
-      if (reg_is_taint_checked(reg, MRI, clean)) {
+      if (reg_is_taint_checked(reg, MRI)) {
+        for (auto const &clean_reg : clean.keys()) {
+          if (MRI.isSubRegisterEq(clean_reg, reg)) {
+            continue; // this register is clean; no check required.
+          }
+        }
+
         // If this register is statically known to be dirty, issue a warning
         if (dirty.contains(reg)) {
-          Ctx.reportWarning(getStartTokLoc(),
-                            Twine("you will access a tainted ")
-                                .concat(Twine(MRI.getName(reg)))
-                                .concat(Twine(".")));
+          Ctx.reportWarning(
+              getStartTokLoc(),
+              Twine("this instruction might access an uninitialized ")
+                  .concat(Twine(MRI.getName(reg)))
+                  .concat(Twine(".")));
         }
         if (!have_emitted_instrumentation) {
           emit_taint_prologue();
@@ -646,7 +664,10 @@ public:
 
     // Mark the cleaned registers as clean
     auto const &cleaned_regs = get_cleaned_registers(inst, MID, MRI);
-    clean.insert(cleaned_regs.begin(), cleaned_regs.end());
+    for (auto const &cleaned_reg : cleaned_regs) {
+      clean.insert(std::make_pair(cleaned_reg, getStartTokLoc()));
+    }
+
     deduplicate_clean();
 
     // Mark the dirtied registers as dirty
@@ -668,13 +689,12 @@ public:
     // If the instruction is a ret, and any nonvolatile register is clean, issue
     // a warning
     if (RET_OPCODES.contains(inst.getOpcode())) {
-      for (auto const &clean_reg : clean) {
+      for (auto const &[clean_reg, loc] : clean) {
         for (auto const &nv_reg : NONVOLATILE_REGS) {
           if (MRI.isSubRegisterEq(nv_reg, clean_reg)) {
-            Ctx.reportWarning(getStartTokLoc(),
-                              Twine("you will clobber ")
-                                  .concat(Twine(MRI.getName(nv_reg)))
-                                  .concat(Twine(".")));
+            Ctx.reportWarning(loc, Twine("this instruction might clobber ")
+                                       .concat(Twine(MRI.getName(nv_reg)))
+                                       .concat(Twine(".")));
           }
         }
       }
