@@ -628,7 +628,7 @@ public:
         if (dirty.contains(reg)) {
           Ctx.reportWarning(
               getStartTokLoc(),
-              Twine("this instruction might access an uninitialized ")
+              Twine("this instruction might access a clobbered ")
                   .concat(Twine(MRI.getName(reg)))
                   .concat(Twine(".")));
         }
@@ -667,7 +667,6 @@ public:
 
     // Remove the uncleaned registers from clean
     for (auto const &reg : get_uncleaned_registers(inst, MID, MRI)) {
-      emitRawComment(Twine("Uncleaning ").concat(MRI.getName(reg)));
       clean.erase(reg);
     }
 
