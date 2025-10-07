@@ -345,6 +345,9 @@ get_required_clean_registers(MCInst const &inst, MCInstrDesc const &MID,
 
 static uint8_t get_taint_check_mask(MCRegister const &reg,
                                     MCRegisterInfo const &MRI) {
+  if (reg == X86::EFLAGS) {
+    return 0xff;
+  }
   switch (get_register_size(reg, MRI)) {
   case 8:
     switch (reg) {

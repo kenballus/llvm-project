@@ -122,6 +122,17 @@ abisan_function_exit:
     mov rsi, qword ptr [rdi + FRAME_RETADDR]
     mov qword ptr [rsp + 8], rsi
 
+    add rsp, 8
+
+    // Set every flag, except
+    // Res_1 (because defined always to be 1)
+    // TF (because too annoying)
+    mov r11, 0xfffffffffffffefd
+    push r11
+    popfq
+
+    // From this point forward, nothing should affect the flags
+
     // Clobber every register that we're allowed to,
     // except rax and rdx, because they're used for
     // returned values
@@ -133,13 +144,8 @@ abisan_function_exit:
     mov r10, 0x4141414141414141
     mov r11, 0x4141414141414141
 
-    // Clobber the flags
-    push r11
-    popfq
-
     // TODO: clobber the other volatile regs, like the vector regs, mxcsr, x87cw, etc.
 
     // TODO: clobber the red zone
 
-    add rsp, 8
     ret
