@@ -61,6 +61,7 @@ __abisan_function_entry:
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_R14], 0xff
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_R15], 0xff
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_RBP], 0xff
+    mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_EFLAGS], 0xff
 
     ret
 stack_misaligned:
@@ -77,45 +78,45 @@ abisan_function_exit:
     fnstcw [rsp]
     mov si, word ptr [rsp]
     cmp si, word ptr [rdi + FRAME_X87CW]
-    jne __abisan_fail_x87cw
+    jne __abisan_fail_clobber_x87cw
 
     stmxcsr dword ptr [rsp]
     mov esi, dword ptr [rsp]
     and esi, 0xffe0
     cmp esi, dword ptr [rdi + FRAME_MXCSR]
-    jne __abisan_fail_mxcsr
+    jne __abisan_fail_clobber_mxcsr
 
     mov si, fs
     cmp si, word ptr [rdi + FRAME_FS]
-    jne __abisan_fail_fs
+    jne __abisan_fail_clobber_fs
 
     mov rsi, rbx
     cmp rsi, qword ptr [rdi + FRAME_RBX]
-    jne __abisan_fail_rbx
+    jne __abisan_fail_clobber_rbx
 
     mov rsi, rbp
     cmp rsi, qword ptr [rdi + FRAME_RBP]
-    jne __abisan_fail_rbp
+    jne __abisan_fail_clobber_rbp
 
     lea rsi, [rsp + 8]
     cmp rsi, qword ptr [rdi + FRAME_RSP]
-    jne __abisan_fail_rsp
+    jne __abisan_fail_clobber_rsp
 
     mov rsi, r12
     cmp rsi, qword ptr [rdi + FRAME_R12]
-    jne __abisan_fail_r12
+    jne __abisan_fail_clobber_r12
 
     mov rsi, r13
     cmp rsi, qword ptr [rdi + FRAME_R13]
-    jne __abisan_fail_r13
+    jne __abisan_fail_clobber_r13
 
     mov rsi, r14
     cmp rsi, qword ptr [rdi + FRAME_R14]
-    jne __abisan_fail_r14
+    jne __abisan_fail_clobber_r14
 
     mov rsi, r15
     cmp rsi, qword ptr [rdi + FRAME_R15]
-    jne __abisan_fail_r15
+    jne __abisan_fail_clobber_r15
 
     // Put the original return address back in place
     mov rsi, qword ptr [rdi + FRAME_RETADDR]
@@ -131,25 +132,14 @@ abisan_function_exit:
     mov r9, 0x4141414141414141
     mov r10, 0x4141414141414141
     mov r11, 0x4141414141414141
+
+    // Clobber the flags
+    push r11
+    popfq
+
     // TODO: clobber the other volatile regs, like the vector regs, mxcsr, x87cw, etc.
 
-    // Clobber the red zone
-    mov qword ptr [rsp - 0x08], rcx
-    mov qword ptr [rsp - 0x10], rcx
-    mov qword ptr [rsp - 0x18], rcx
-    mov qword ptr [rsp - 0x20], rcx
-    mov qword ptr [rsp - 0x28], rcx
-    mov qword ptr [rsp - 0x30], rcx
-    mov qword ptr [rsp - 0x38], rcx
-    mov qword ptr [rsp - 0x40], rcx
-    mov qword ptr [rsp - 0x48], rcx
-    mov qword ptr [rsp - 0x50], rcx
-    mov qword ptr [rsp - 0x58], rcx
-    mov qword ptr [rsp - 0x60], rcx
-    mov qword ptr [rsp - 0x68], rcx
-    mov qword ptr [rsp - 0x70], rcx
-    mov qword ptr [rsp - 0x78], rcx
-    mov qword ptr [rsp - 0x80], rcx
+    // TODO: clobber the red zone
 
     add rsp, 8
     ret

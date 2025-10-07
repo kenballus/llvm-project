@@ -16,6 +16,7 @@ struct shadow_stack_frame {
   uint64_t r14;
   uint64_t r15;
   void *instrumentation_retaddr;
+  uint32_t eflags;
   uint16_t x87cw;
   uint16_t fs;
   uint32_t mxcsr;
@@ -30,6 +31,7 @@ static_assert(FRAME_R12 == offsetof(struct shadow_stack_frame, r12));
 static_assert(FRAME_R13 == offsetof(struct shadow_stack_frame, r13));
 static_assert(FRAME_R14 == offsetof(struct shadow_stack_frame, r14));
 static_assert(FRAME_R15 == offsetof(struct shadow_stack_frame, r15));
+static_assert(FRAME_EFLAGS == offsetof(struct shadow_stack_frame, eflags));
 static_assert(FRAME_INSTRUMENTATION_RETADDR ==
               offsetof(struct shadow_stack_frame, instrumentation_retaddr));
 static_assert(FRAME_X87CW == offsetof(struct shadow_stack_frame, x87cw));
@@ -57,6 +59,7 @@ struct taint_state {
   uint8_t r14;
   uint8_t r15;
   uint8_t rbp;
+  uint8_t eflags;
   // TODO: Track all the other registers
 } __attribute__((packed));
 
@@ -75,6 +78,7 @@ static_assert(TAINT_STATE_R13 == offsetof(struct taint_state, r13));
 static_assert(TAINT_STATE_R14 == offsetof(struct taint_state, r14));
 static_assert(TAINT_STATE_R15 == offsetof(struct taint_state, r15));
 static_assert(TAINT_STATE_RBP == offsetof(struct taint_state, rbp));
+static_assert(TAINT_STATE_EFLAGS == offsetof(struct taint_state, eflags));
 
 struct taint_state __abisan_taint_state = {.rax = 0xff,
                                            .rbx = 0xff,
@@ -127,57 +131,22 @@ abisan_fail_clobber(char const *const clobbered_register,
   exit(EXIT_FAILURE);
 }
 
-[[noreturn]] void
-__abisan_fail_rbx(struct shadow_stack_frame const *const frame, uint64_t rbx) {
-  abisan_fail_clobber("rbx", rbx, frame);
-}
+#define ABISAN_FAIL_CLOBBER_DEF(reg)                                           \
+  [[noreturn]] void __abisan_fail_clobber_##reg(                               \
+      struct shadow_stack_frame const *const frame, uint64_t reg) {            \
+    abisan_fail_clobber(#reg, reg, frame);                                     \
+  }
 
-[[noreturn]] void
-__abisan_fail_rbp(struct shadow_stack_frame const *const frame, uint64_t rbp) {
-  abisan_fail_clobber("rbp", rbp, frame);
-}
-
-[[noreturn]] void
-__abisan_fail_rsp(struct shadow_stack_frame const *const frame, uint64_t rsp) {
-  abisan_fail_clobber("rsp", rsp, frame);
-}
-
-[[noreturn]] void
-__abisan_fail_r12(struct shadow_stack_frame const *const frame, uint64_t r12) {
-  abisan_fail_clobber("r12", r12, frame);
-}
-
-[[noreturn]] void
-__abisan_fail_r13(struct shadow_stack_frame const *const frame, uint64_t r13) {
-  abisan_fail_clobber("r13", r13, frame);
-}
-
-[[noreturn]] void
-__abisan_fail_r14(struct shadow_stack_frame const *const frame, uint64_t r14) {
-  abisan_fail_clobber("r14", r14, frame);
-}
-
-[[noreturn]] void
-__abisan_fail_r15(struct shadow_stack_frame const *const frame, uint64_t r15) {
-  abisan_fail_clobber("r15", r15, frame);
-}
-
-[[noreturn]] void
-__abisan_fail_x87cw(struct shadow_stack_frame const *const frame,
-                    uint16_t x87cw) {
-  abisan_fail_clobber("x87 control word", x87cw, frame);
-}
-
-[[noreturn]] void __abisan_fail_fs(struct shadow_stack_frame const *const frame,
-                                   uint16_t fs) {
-  abisan_fail_clobber("fs", fs, frame);
-}
-
-[[noreturn]] void
-__abisan_fail_mxcsr(struct shadow_stack_frame const *const frame,
-                    uint16_t mxcsr) {
-  abisan_fail_clobber("mxcsr control bits", mxcsr, frame);
-}
+ABISAN_FAIL_CLOBBER_DEF(rbx)
+ABISAN_FAIL_CLOBBER_DEF(rbp)
+ABISAN_FAIL_CLOBBER_DEF(rsp)
+ABISAN_FAIL_CLOBBER_DEF(r12)
+ABISAN_FAIL_CLOBBER_DEF(r13)
+ABISAN_FAIL_CLOBBER_DEF(r14)
+ABISAN_FAIL_CLOBBER_DEF(r15)
+ABISAN_FAIL_CLOBBER_DEF(x87cw)
+ABISAN_FAIL_CLOBBER_DEF(fs)
+ABISAN_FAIL_CLOBBER_DEF(mxcsr)
 
 [[noreturn]] void __abisan_fail_mov_below_rsp(void) {
   fprintf(stderr,
@@ -190,127 +159,86 @@ __abisan_fail_mxcsr(struct shadow_stack_frame const *const frame,
   exit(EXIT_FAILURE);
 }
 
-[[noreturn]] void __abisan_fail_taint_rax(void) { abisan_fail_taint("rax"); }
+#define ABISAN_FAIL_TAINT_DEF(reg)                                             \
+  [[noreturn]] void __abisan_fail_taint_##reg(void) { abisan_fail_taint(#reg); }
 
-[[noreturn]] void __abisan_fail_taint_eax(void) { abisan_fail_taint("eax"); }
+ABISAN_FAIL_TAINT_DEF(rax)
+ABISAN_FAIL_TAINT_DEF(eax)
+ABISAN_FAIL_TAINT_DEF(ax)
+ABISAN_FAIL_TAINT_DEF(ah)
+ABISAN_FAIL_TAINT_DEF(al)
 
-[[noreturn]] void __abisan_fail_taint_ax(void) { abisan_fail_taint("ax"); }
+ABISAN_FAIL_TAINT_DEF(rbx)
+ABISAN_FAIL_TAINT_DEF(ebx)
+ABISAN_FAIL_TAINT_DEF(bx)
+ABISAN_FAIL_TAINT_DEF(bh)
+ABISAN_FAIL_TAINT_DEF(bl)
 
-[[noreturn]] void __abisan_fail_taint_ah(void) { abisan_fail_taint("ah"); }
+ABISAN_FAIL_TAINT_DEF(rcx)
+ABISAN_FAIL_TAINT_DEF(ecx)
+ABISAN_FAIL_TAINT_DEF(cx)
+ABISAN_FAIL_TAINT_DEF(ch)
+ABISAN_FAIL_TAINT_DEF(cl)
 
-[[noreturn]] void __abisan_fail_taint_al(void) { abisan_fail_taint("al"); }
-[[noreturn]] void __abisan_fail_taint_rbx(void) { abisan_fail_taint("rbx"); }
+ABISAN_FAIL_TAINT_DEF(rdx)
+ABISAN_FAIL_TAINT_DEF(edx)
+ABISAN_FAIL_TAINT_DEF(dx)
+ABISAN_FAIL_TAINT_DEF(dh)
+ABISAN_FAIL_TAINT_DEF(dl)
 
-[[noreturn]] void __abisan_fail_taint_ebx(void) { abisan_fail_taint("ebx"); }
+ABISAN_FAIL_TAINT_DEF(rdi)
+ABISAN_FAIL_TAINT_DEF(edi)
+ABISAN_FAIL_TAINT_DEF(di)
+ABISAN_FAIL_TAINT_DEF(dil)
 
-[[noreturn]] void __abisan_fail_taint_bx(void) { abisan_fail_taint("bx"); }
+ABISAN_FAIL_TAINT_DEF(rsi)
+ABISAN_FAIL_TAINT_DEF(esi)
+ABISAN_FAIL_TAINT_DEF(si)
+ABISAN_FAIL_TAINT_DEF(sil)
 
-[[noreturn]] void __abisan_fail_taint_bh(void) { abisan_fail_taint("bh"); }
+ABISAN_FAIL_TAINT_DEF(r8)
+ABISAN_FAIL_TAINT_DEF(r8d)
+ABISAN_FAIL_TAINT_DEF(r8w)
+ABISAN_FAIL_TAINT_DEF(r8b)
 
-[[noreturn]] void __abisan_fail_taint_bl(void) { abisan_fail_taint("bl"); }
-[[noreturn]] void __abisan_fail_taint_rcx(void) { abisan_fail_taint("rcx"); }
+ABISAN_FAIL_TAINT_DEF(r9)
+ABISAN_FAIL_TAINT_DEF(r9d)
+ABISAN_FAIL_TAINT_DEF(r9w)
+ABISAN_FAIL_TAINT_DEF(r9b)
 
-[[noreturn]] void __abisan_fail_taint_ecx(void) { abisan_fail_taint("ecx"); }
+ABISAN_FAIL_TAINT_DEF(r10)
+ABISAN_FAIL_TAINT_DEF(r10d)
+ABISAN_FAIL_TAINT_DEF(r10w)
+ABISAN_FAIL_TAINT_DEF(r10b)
 
-[[noreturn]] void __abisan_fail_taint_cx(void) { abisan_fail_taint("cx"); }
+ABISAN_FAIL_TAINT_DEF(r11)
+ABISAN_FAIL_TAINT_DEF(r11d)
+ABISAN_FAIL_TAINT_DEF(r11w)
+ABISAN_FAIL_TAINT_DEF(r11b)
 
-[[noreturn]] void __abisan_fail_taint_ch(void) { abisan_fail_taint("ch"); }
+ABISAN_FAIL_TAINT_DEF(r12)
+ABISAN_FAIL_TAINT_DEF(r12d)
+ABISAN_FAIL_TAINT_DEF(r12w)
+ABISAN_FAIL_TAINT_DEF(r12b)
 
-[[noreturn]] void __abisan_fail_taint_cl(void) { abisan_fail_taint("cl"); }
-[[noreturn]] void __abisan_fail_taint_rdx(void) { abisan_fail_taint("rdx"); }
+ABISAN_FAIL_TAINT_DEF(r13)
+ABISAN_FAIL_TAINT_DEF(r13d)
+ABISAN_FAIL_TAINT_DEF(r13w)
+ABISAN_FAIL_TAINT_DEF(r13b)
 
-[[noreturn]] void __abisan_fail_taint_edx(void) { abisan_fail_taint("edx"); }
+ABISAN_FAIL_TAINT_DEF(r14)
+ABISAN_FAIL_TAINT_DEF(r14d)
+ABISAN_FAIL_TAINT_DEF(r14w)
+ABISAN_FAIL_TAINT_DEF(r14b)
 
-[[noreturn]] void __abisan_fail_taint_dx(void) { abisan_fail_taint("dx"); }
+ABISAN_FAIL_TAINT_DEF(r15)
+ABISAN_FAIL_TAINT_DEF(r15d)
+ABISAN_FAIL_TAINT_DEF(r15w)
+ABISAN_FAIL_TAINT_DEF(r15b)
 
-[[noreturn]] void __abisan_fail_taint_dh(void) { abisan_fail_taint("dh"); }
+ABISAN_FAIL_TAINT_DEF(rbp)
+ABISAN_FAIL_TAINT_DEF(ebp)
+ABISAN_FAIL_TAINT_DEF(bp)
+ABISAN_FAIL_TAINT_DEF(bpl)
 
-[[noreturn]] void __abisan_fail_taint_dl(void) { abisan_fail_taint("dl"); }
-
-[[noreturn]] void __abisan_fail_taint_rdi(void) { abisan_fail_taint("rdi"); }
-
-[[noreturn]] void __abisan_fail_taint_edi(void) { abisan_fail_taint("edi"); }
-
-[[noreturn]] void __abisan_fail_taint_di(void) { abisan_fail_taint("di"); }
-
-[[noreturn]] void __abisan_fail_taint_dil(void) { abisan_fail_taint("dil"); }
-
-[[noreturn]] void __abisan_fail_taint_rsi(void) { abisan_fail_taint("rsi"); }
-
-[[noreturn]] void __abisan_fail_taint_esi(void) { abisan_fail_taint("esi"); }
-
-[[noreturn]] void __abisan_fail_taint_si(void) { abisan_fail_taint("si"); }
-
-[[noreturn]] void __abisan_fail_taint_sil(void) { abisan_fail_taint("sil"); }
-
-[[noreturn]] void __abisan_fail_taint_r8(void) { abisan_fail_taint("r8"); }
-
-[[noreturn]] void __abisan_fail_taint_r8d(void) { abisan_fail_taint("r8d"); }
-
-[[noreturn]] void __abisan_fail_taint_r8w(void) { abisan_fail_taint("r8w"); }
-
-[[noreturn]] void __abisan_fail_taint_r8b(void) { abisan_fail_taint("r8b"); }
-
-[[noreturn]] void __abisan_fail_taint_r9(void) { abisan_fail_taint("r9"); }
-
-[[noreturn]] void __abisan_fail_taint_r9d(void) { abisan_fail_taint("r9d"); }
-
-[[noreturn]] void __abisan_fail_taint_r9w(void) { abisan_fail_taint("r9w"); }
-
-[[noreturn]] void __abisan_fail_taint_r9b(void) { abisan_fail_taint("r9b"); }
-
-[[noreturn]] void __abisan_fail_taint_r10(void) { abisan_fail_taint("r10"); }
-
-[[noreturn]] void __abisan_fail_taint_r10d(void) { abisan_fail_taint("r10d"); }
-
-[[noreturn]] void __abisan_fail_taint_r10w(void) { abisan_fail_taint("r10w"); }
-
-[[noreturn]] void __abisan_fail_taint_r10b(void) { abisan_fail_taint("r10b"); }
-
-[[noreturn]] void __abisan_fail_taint_r11(void) { abisan_fail_taint("r11"); }
-
-[[noreturn]] void __abisan_fail_taint_r11d(void) { abisan_fail_taint("r11d"); }
-
-[[noreturn]] void __abisan_fail_taint_r11w(void) { abisan_fail_taint("r11w"); }
-
-[[noreturn]] void __abisan_fail_taint_r11b(void) { abisan_fail_taint("r11b"); }
-
-[[noreturn]] void __abisan_fail_taint_r12(void) { abisan_fail_taint("r12"); }
-
-[[noreturn]] void __abisan_fail_taint_r12d(void) { abisan_fail_taint("r12d"); }
-
-[[noreturn]] void __abisan_fail_taint_r12w(void) { abisan_fail_taint("r12w"); }
-
-[[noreturn]] void __abisan_fail_taint_r12b(void) { abisan_fail_taint("r12b"); }
-
-[[noreturn]] void __abisan_fail_taint_r13(void) { abisan_fail_taint("r13"); }
-
-[[noreturn]] void __abisan_fail_taint_r13d(void) { abisan_fail_taint("r13d"); }
-
-[[noreturn]] void __abisan_fail_taint_r13w(void) { abisan_fail_taint("r13w"); }
-
-[[noreturn]] void __abisan_fail_taint_r13b(void) { abisan_fail_taint("r13b"); }
-
-[[noreturn]] void __abisan_fail_taint_r14(void) { abisan_fail_taint("r14"); }
-
-[[noreturn]] void __abisan_fail_taint_r14d(void) { abisan_fail_taint("r14d"); }
-
-[[noreturn]] void __abisan_fail_taint_r14w(void) { abisan_fail_taint("r14w"); }
-
-[[noreturn]] void __abisan_fail_taint_r14b(void) { abisan_fail_taint("r14b"); }
-
-[[noreturn]] void __abisan_fail_taint_r15(void) { abisan_fail_taint("r15"); }
-
-[[noreturn]] void __abisan_fail_taint_r15d(void) { abisan_fail_taint("r15d"); }
-
-[[noreturn]] void __abisan_fail_taint_r15w(void) { abisan_fail_taint("r15w"); }
-
-[[noreturn]] void __abisan_fail_taint_r15b(void) { abisan_fail_taint("r15b"); }
-
-[[noreturn]] void __abisan_fail_taint_rbp(void) { abisan_fail_taint("rbp"); }
-
-[[noreturn]] void __abisan_fail_taint_ebp(void) { abisan_fail_taint("ebp"); }
-
-[[noreturn]] void __abisan_fail_taint_bp(void) { abisan_fail_taint("bp"); }
-
-[[noreturn]] void __abisan_fail_taint_bpl(void) { abisan_fail_taint("bpl"); }
+ABISAN_FAIL_TAINT_DEF(eflags)
