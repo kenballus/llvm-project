@@ -493,6 +493,9 @@ class ABISanStreamer : public MCAsmStreamer {
 
   void emit_taint_check_prologue() {
     emit_instructions({
+        // push rax // (This could be omitted if all taint checks are
+        // full-width)
+        MCInstBuilder(X86::PUSH64r).addReg(X86::RAX),
         // push rbp
         MCInstBuilder(X86::PUSH64r).addReg(X86::RBP),
         // mov rbp, rsp
@@ -502,8 +505,6 @@ class ABISanStreamer : public MCAsmStreamer {
             .addReg(X86::RSP)
             .addReg(X86::RSP)
             .addImm(0xfffffffffffffff0ull),
-        // push rax
-        MCInstBuilder(X86::PUSH64r).addReg(X86::RAX),
     });
   }
 
@@ -511,6 +512,11 @@ class ABISanStreamer : public MCAsmStreamer {
     MCContext &Ctx = getContext();
     MCRegisterInfo const &MRI = *Ctx.getRegisterInfo();
     uint8_t const taint_check_mask = get_taint_check_mask(reg, MRI);
+
+    MCBinaryExpr const *taint_entry = MCBinaryExpr::createAdd(
+        MCSymbolRefExpr::create(Ctx.getOrCreateSymbol("__abisan_taint_state"),
+                                Ctx),
+        MCConstantExpr::create(get_taint_state_index(reg, MRI), Ctx), Ctx);
     if (taint_check_mask == 0xff) {
       emit_instructions({
           // cmp byte ptr [rip + __abisan_taint_state +
@@ -519,18 +525,9 @@ class ABISanStreamer : public MCAsmStreamer {
               .addReg(X86::RIP)
               .addImm(1 /* scale */)
               .addReg(0 /* index */)
-              .addExpr(MCBinaryExpr::createAdd(
-                  MCSymbolRefExpr::create(
-                      Ctx.getOrCreateSymbol("__abisan_taint_state"), Ctx),
-                  MCConstantExpr::create(get_taint_state_index(reg, MRI), Ctx),
-                  Ctx))
+              .addExpr(taint_entry)
               .addReg(0 /* segment register */)
               .addImm(0),
-          // jne __abisan_fail_taint_$REG
-          MCInstBuilder(X86::JCC_1)
-              .addExpr(MCSymbolRefExpr::create(
-                  Ctx.getOrCreateSymbol(get_fail_taint_symbol(reg, MRI)), Ctx))
-              .addImm(X86::COND_NE),
       });
     } else {
       emit_instructions({
@@ -541,11 +538,7 @@ class ABISanStreamer : public MCAsmStreamer {
               .addReg(X86::RIP)
               .addImm(1 /* scale */)
               .addReg(0 /* index */)
-              .addExpr(MCBinaryExpr::createAdd(
-                  MCSymbolRefExpr::create(
-                      Ctx.getOrCreateSymbol("__abisan_taint_state"), Ctx),
-                  MCConstantExpr::create(get_taint_state_index(reg, MRI), Ctx),
-                  Ctx))
+              .addExpr(taint_entry)
               .addReg(0 /* segment register */),
           // and al, TAINT_MASK($REG)
           MCInstBuilder(X86::AND8ri)
@@ -554,21 +547,22 @@ class ABISanStreamer : public MCAsmStreamer {
               .addImm(taint_check_mask),
           // cmp al, 0
           MCInstBuilder(X86::CMP8ri).addReg(X86::AL).addImm(0),
-          // jne __abisan_fail_taint_$REG
-          MCInstBuilder(X86::JCC_1)
-              .addExpr(MCSymbolRefExpr::create(
-                  Ctx.getOrCreateSymbol(get_fail_taint_symbol(reg, MRI)), Ctx))
-              .addImm(X86::COND_NE),
       });
     }
+    emit_instructions(
+        {// jne __abisan_fail_taint_$REG
+         MCInstBuilder(X86::JCC_1)
+             .addExpr(MCSymbolRefExpr::create(
+                 Ctx.getOrCreateSymbol(get_fail_taint_symbol(reg, MRI)), Ctx))
+             .addImm(X86::COND_NE)});
   }
 
   void emit_taint_check_epilogue() {
     emit_instructions({
-        // pop rax
-        MCInstBuilder(X86::POP64r).addReg(X86::RAX),
         // leave
         MCInstBuilder(X86::LEAVE),
+        // pop rax // (This could be omitted if all taint checks are full-width)
+        MCInstBuilder(X86::POP64r).addReg(X86::RAX),
     });
   }
 
@@ -618,6 +612,33 @@ class ABISanStreamer : public MCAsmStreamer {
                  Ctx))
              .addReg(0 /* segment register */)
              .addImm(0xff)});
+  }
+
+  void emit_call_instrumentation() {
+    MCContext &Ctx = getContext();
+    // TODO: if this call is not to an ABI-compliant function, then
+    // we really shouldn't be clobbering r11 here.
+    // Maybe support a symbol blacklist?
+    emit_instructions(
+        {// lea r11, [rip]
+         MCInstBuilder(X86::LEA64r)
+             .addReg(X86::R11)
+             .addReg(X86::RIP)
+             .addReg(1 /* scale */)
+             .addReg(0 /* index */)
+             .addImm(0 /* displacement */)
+             .addReg(0 /* segment register */),
+         // mov qword ptr [rip + __abisan_last_instrumented_call], r11
+         MCInstBuilder(X86::MOV64rm)
+             .addReg(X86::R11)
+             .addReg(X86::RIP)
+             .addImm(1 /* scale */)
+             .addReg(0 /* index */)
+             .addExpr(MCSymbolRefExpr::create(
+                 Ctx.getOrCreateSymbol("__abisan_last_instrumented_call"), Ctx))
+             .addReg(0 /* segment register */)
+
+        });
   }
 
   void emit_comments(MCInst const &inst) {
@@ -690,6 +711,7 @@ public:
     MCRegisterInfo const &MRI = *Ctx.getRegisterInfo();
     MCInstrDesc const &MID = MCII.get(inst.getOpcode());
 
+    // Taint checking
     bool have_emitted_instrumentation = false;
     for (auto const &reg : get_required_clean_registers(inst, MID, MRI)) {
       if (is_taint_checked(reg, MRI)) {
@@ -725,6 +747,7 @@ public:
       emit_taint_check_epilogue();
     }
 
+    // Taint clearing
     for (auto const &reg : get_cleaned_registers(inst, MID, MRI)) {
       if (!have_emitted_instrumentation) {
         emit_taint_prologue();
@@ -735,6 +758,10 @@ public:
     }
     if (have_emitted_instrumentation) {
       emit_taint_epilogue();
+    }
+
+    if (CALL_OPCODES.contains(inst.getOpcode())) {
+      emit_call_instrumentation();
     }
 
     // emit_comments(inst);

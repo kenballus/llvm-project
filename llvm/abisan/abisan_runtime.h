@@ -1,5 +1,7 @@
 #define SHADOW_STACK_FRAME_SIZE 84
 
+#define MAX_INSTRUCTION_SIZE 15
+
 // Offsets of fields within struct abisan_shadow_stack_frame
 #define FRAME_RETADDR 0x00
 #define FRAME_RBX 0x08

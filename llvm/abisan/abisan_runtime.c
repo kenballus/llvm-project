@@ -6,6 +6,8 @@
 
 #include "abisan_runtime.h"
 
+void *__abisan_last_instrumented_call;
+
 struct shadow_stack_frame {
   void *retaddr;
   uint64_t rbx;

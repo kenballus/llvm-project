@@ -4,7 +4,7 @@
 
 .globl __abisan_function_entry
 __abisan_function_entry:
-    mov r11, qword ptr [rip + __abisan_shadow_stack_pointer]
+    mov r11, qword ptr [rip + __abisan_shadow_stack_pointer] // r11 = __abisan_shadow_stack_pointer
     // Save stuff into the frame
     mov qword ptr [r11 + FRAME_RBX], rbx
     mov qword ptr [r11 + FRAME_RBP], rbp
@@ -21,33 +21,29 @@ __abisan_function_entry:
     and dword ptr [r11 + FRAME_MXCSR], 0xffe0
 
     // Save calling function's return address into the frame for later restoration
-    // Requires another register to read the return address into
-    mov rbx, qword ptr [rsp + 0x8]
+    mov rbx, qword ptr [rsp + 0x8] // rbx = instrumented function's retaddr
     mov qword ptr [r11 + FRAME_RETADDR], rbx
 
-    // Save our return address into the frame for debugging purposes
-    mov rbx, qword ptr [rsp]
+    // Save our return address into the frame
+    mov rbx, qword ptr [rsp] // rbx = our retaddr
     mov qword ptr [r11 + FRAME_INSTRUMENTATION_RETADDR], rbx
 
-    mov rbx, qword ptr [r11 + FRAME_RBX] // Put rbx back
-
-    // Check for stack misalignment
-    // Happens here so shadow stack frame is populated
-    mov r11, rsp
-    and r11, 0xf
-    cmp r11, 0x0
-    jne stack_misaligned
-
     // Replace the return address on the stack with abisan_function_exit
-    lea r11, [rip + abisan_function_exit]
+    lea r11, [rip + abisan_function_exit] // r11 = abisan_function_exit
     mov qword ptr [rsp + 0x8], r11
 
-    // Update __abisan_shadow_stack_pointer
-    add qword ptr [rip + __abisan_shadow_stack_pointer], SHADOW_STACK_FRAME_SIZE
+    // Untaint the argument registers if the function that called the instrumented
+    // function wasn't instrumented.
 
-    lea r11, [rip + __abisan_taint_state]
+    mov r11, qword ptr [rip + __abisan_last_instrumented_call] // r11 = __abisan_last_instrumented_call
+    sub rbx, r11 // rbx still contains our retaddr
+    cmp rbx, MAX_INSTRUCTION_SIZE
+    mov r11, qword ptr [rip + __abisan_shadow_stack_pointer] // r11 = __abisan_shadow_stack_pointer
+    mov rbx, qword ptr [r11 + FRAME_RBX] // Put rbx back
+
+    jb done_untainting
+
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_RAX], 0
-    mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_RBX], 0xff
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_RCX], 0
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_RDX], 0
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_RDI], 0
@@ -55,6 +51,10 @@ __abisan_function_entry:
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_R8], 0
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_R9], 0
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_R10], 0
+done_untainting:
+
+    // Taint the non-argument registers
+    mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_RBX], 0xff
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_R11], 0xff
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_R12], 0xff
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_R13], 0xff
@@ -62,6 +62,15 @@ __abisan_function_entry:
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_R15], 0xff
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_RBP], 0xff
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_EFLAGS], 0xff
+
+    // Update __abisan_shadow_stack_pointer
+    add qword ptr [rip + __abisan_shadow_stack_pointer], SHADOW_STACK_FRAME_SIZE
+
+    // Check for stack misalignment
+    mov r11, rsp // r11 = rsp & 0xf
+    and r11, 0xf
+    cmp r11, 0x0
+    jne stack_misaligned
 
     ret
 stack_misaligned:
