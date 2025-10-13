@@ -1,0 +1,4 @@
+*.o
+*.a
+.gdb_history
+abisan
