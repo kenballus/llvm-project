@@ -881,7 +881,7 @@ int main(int const argc, char const *const *const argv) {
   std::string error;
   std::string triple_name = sys::getDefaultTargetTriple();
   Triple const triple = Triple(triple_name);
-  Target const *const Target = TargetRegistry::lookupTarget(triple_name, error);
+  Target const *const Target = TargetRegistry::lookupTarget(triple, error);
 
   if (!Target) {
     errs() << "Failed to lookup target: " << error << "\n";

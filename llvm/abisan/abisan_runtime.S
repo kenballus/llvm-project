@@ -32,9 +32,8 @@ __abisan_function_entry:
     lea r11, [rip + abisan_function_exit] // r11 = abisan_function_exit
     mov qword ptr [rsp + 0x8], r11
 
-    // Untaint the argument registers if the function that called the instrumented
-    // function wasn't instrumented.
-
+    // If the calling function is instrumented, don't untaint the args, since
+    // their taint state is already correct.
     mov r11, qword ptr [rip + __abisan_last_instrumented_call] // r11 = __abisan_last_instrumented_call
     sub rbx, r11 // rbx still contains our retaddr
     cmp rbx, MAX_INSTRUCTION_SIZE
@@ -43,16 +42,18 @@ __abisan_function_entry:
 
     jb done_untainting
 
-    mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_RAX], 0
-    mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_RCX], 0
-    mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_RDX], 0
-    mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_RDI], 0
-    mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_RSI], 0
-    mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_R8], 0
-    mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_R9], 0
-    mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_R10], 0
-done_untainting:
+    # Untaint all the registers that can be used for arg passing.
+    # (This is only done when the calling function is not instrumented)
+    mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_RAX], 0 # FP vararg count
+    mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_RCX], 0 # Arg 4
+    mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_RDX], 0 # Arg 3
+    mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_RDI], 0 # Arg 1
+    mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_RSI], 0 # Arg 2
+    mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_R8], 0  # Arg 5
+    mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_R9], 0  # Arg 6
+    mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_R10], 0 # Chain pointer
 
+done_untainting:
     // Taint the non-argument registers
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_RBX], 0xff
     mov byte ptr [rip + __abisan_taint_state + TAINT_STATE_R11], 0xff
