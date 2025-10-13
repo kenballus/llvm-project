@@ -125,6 +125,15 @@ static DenseSet<MCRegister> const SYSCALL_CLOBBERED_REGS{X86::RCX, X86::R11};
 static DenseSet<MCRegister> const NON_ARGUMENT_REGS{
     X86::R11, X86::R12, X86::R13, X86::R14, X86::R15, X86::RBP, X86::RBX};
 
+// Registers that are used for any form of argument passing
+static DenseSet<MCRegister> const ARGUMENT_REGS{X86::RAX, X86::RDI, X86::RSI,
+                                                X86::RDX, X86::RCX, X86::R8,
+                                                X86::R9,  X86::R10};
+
+// Registers that are used as arguments to main
+static DenseSet<MCRegister> const MAIN_ARGUMENT_REGS{X86::EDI, X86::RSI,
+                                                     X86::RDX};
+
 // Registers that are used for return values
 static DenseSet<MCRegister> const RETVAL_REGS{X86::RAX, X86::RDX};
 
@@ -728,10 +737,11 @@ public:
 
         // If this register is statically known to be dirty, issue a warning
         if (dirty.contains(reg)) {
-          Ctx.reportWarning(getStartTokLoc(),
-                            Twine("this instruction might access a clobbered ")
-                                .concat(Twine(to_lower(MRI.getName(reg))))
-                                .concat(Twine(".")));
+          Ctx.reportWarning(
+              getStartTokLoc(),
+              Twine("this instruction might access an uninitialized ")
+                  .concat(Twine(to_lower(MRI.getName(reg))))
+                  .concat(Twine(".")));
         }
         if (!have_emitted_instrumentation) {
           emit_taint_prologue();
@@ -819,6 +829,7 @@ public:
   }
 
   void emitLabel(MCSymbol *Symbol, SMLoc Loc = SMLoc()) override {
+    MCRegisterInfo const &MRI = *getContext().getRegisterInfo();
     MCAsmStreamer::emitLabel(Symbol, Loc);
     // Because a label could be a jump target,
     // we need to clear the dirty and clean sets.
@@ -826,22 +837,60 @@ public:
     dirty.clear();
     for (auto instrumented_symbol : instrumented_symbols) {
       if (Symbol->getName().str() == instrumented_symbol->getName().str()) {
-        MCRegisterInfo const &MRI = *getContext().getRegisterInfo();
+        // call __abisan_function_entry
+        emit_entry_call();
+
+        if (Symbol->getName().str() == std::string("main")) {
+          // The argument registers not used for passing arguments to main
+          // should be marked dirty.
+          for (auto const &reg : ARGUMENT_REGS) {
+            for (auto const &subreg : MRI.subregs_inclusive(reg)) {
+              bool is_main_arg_subreg = false;
+              for (auto const &main_arg : MAIN_ARGUMENT_REGS) {
+                if (MRI.isSubRegisterEq(main_arg, subreg)) {
+                  is_main_arg_subreg = true;
+                  break;
+                }
+              }
+              if (!is_main_arg_subreg) {
+                dirty.insert(subreg);
+              }
+            }
+          }
+
+          // The registers used for passing arguments to main should be marked
+          // clean. No need to deduplicate here because we know clean was empty.
+          for (auto const &reg : MAIN_ARGUMENT_REGS) {
+            clean.insert(std::make_pair(reg, getStartTokLoc()));
+          }
+
+          // Because by default, an instrumented function called by a
+          // non-instrumented function will have all argument-passing registers
+          // untainted, we need to manually taint all the arg-passing registers
+          // that aren't used by main. This could be made more efficient, but
+          // I'm okay with this implementation because it's simple and it only
+          // runs once anyway.
+          for (auto const &reg : ARGUMENT_REGS) {
+            emit_taint_set(reg);
+          }
+          for (auto const &reg : MAIN_ARGUMENT_REGS) {
+            emit_taint_clear(reg);
+            // This affects the flags, but we don't need to pushfq/popfq because
+            // the state of the flags is undefined at this point anyway
+          }
+        }
+
         // Mark the non-arg registers as dirty.
         // The corresponding tainting happens in __abisan_function_entry
         for (auto const &non_arg_reg : NON_ARGUMENT_REGS) {
           auto subregs = MRI.subregs_inclusive(non_arg_reg);
           dirty.insert(subregs.begin(), subregs.end());
         }
-        // No need to deduplicate here because we know that the dirty set was
-        // empty. Unless any of the non_arg_regs overlap? This isn't a thing on
-        // x86, at least.
+        // No need to deduplicate here because we know that the dirty set
+        // contains (at most) only argument registers.
 
         // We can't add the arg registers to clean, because we don't know if
         // they'll be used.
-
-        // call __abisan_function_entry
-        emit_entry_call();
         return;
       }
     }
