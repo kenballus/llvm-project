@@ -1,5 +1,5 @@
 #!/bin/bash
 
-./test || exit 1
+./test && exit 1
 
 exit 0

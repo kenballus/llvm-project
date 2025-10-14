@@ -117,8 +117,8 @@ for each statement in the input, reading top to bottom:
 ### Runtime Library
 
 `__abisan_function_entry` is a special function that is intended to be called as the first instruction in every instrumented function.
-It basically saves all nonvolatile registers into a shadow stack, then overwrites the return address of the calling function with the address of `abisan_function_exit`.
-`abisan_function_exit` checks that the nonvolatile registers' values match those saved in the shadow stack.
+It basically saves all nonvolatile registers into a shadow stack, then overwrites the return address of the calling function with the address of `__abisan_function_exit`.
+`__abisan_function_exit` checks that the nonvolatile registers' values match those saved in the shadow stack.
 Each of these functions also does a bunch of other crap, like checking stack alignedness and updating taint state, but I don't feel like writing more right now.
 
 ## Limitations

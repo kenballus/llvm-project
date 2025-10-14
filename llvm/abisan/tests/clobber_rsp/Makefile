@@ -9,15 +9,11 @@ fmt:
 	clang-format --style='{IndentWidth: 4, AllowShortFunctionsOnASingleLine: false}' -i *.c
 
 clean:
-	rm -f test.o test2.o test out.s out2.s
+	rm -f test.o test out.s
 
 test.o: test.s
 	../../abisan test.s > out.s
 	$(CC) -c $(CFLAGS) out.s -o $@
 
-test2.o: test2.s
-	../../abisan test2.s > out2.s
-	$(CC) -c $(CFLAGS) out2.s -o $@
-
-test: main.c test.o test2.o ../../libabisan_runtime.a
+test: main.c test.o ../../libabisan_runtime.a
 	$(CC) $(CFLAGS) $^ -o $@

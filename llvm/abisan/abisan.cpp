@@ -39,8 +39,9 @@
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/TargetParser/Host.h"
 #include <cctype>  // for std::tolower
+#include <string>  // for std::string, std::to_string
 #include <utility> // for std::make_pair
-#include <vector>
+#include <vector>  // for std::vector
 
 using namespace llvm;
 
@@ -466,6 +467,7 @@ class ABISanStreamer : public MCAsmStreamer {
              // Mapped to SMLoc that the register was marked clean.
   DenseSet<MCRegister> dirty; // Registers statically known to be dirty. If X is
                               // dirty, it is possible that X's subregs are not.
+  uint64_t num_instrumented_calls = 0;
 
   void deduplicate_clean() {
     MCRegisterInfo const &MRI = *getContext().getRegisterInfo();
@@ -505,15 +507,6 @@ class ABISanStreamer : public MCAsmStreamer {
         // push rax // (This could be omitted if all taint checks are
         // full-width)
         MCInstBuilder(X86::PUSH64r).addReg(X86::RAX),
-        // push rbp
-        MCInstBuilder(X86::PUSH64r).addReg(X86::RBP),
-        // mov rbp, rsp
-        MCInstBuilder(X86::MOV64rr).addReg(X86::RBP).addReg(X86::RSP),
-        // and rsp, 0xfffffffffffffff0
-        MCInstBuilder(X86::AND64ri8)
-            .addReg(X86::RSP)
-            .addReg(X86::RSP)
-            .addImm(0xfffffffffffffff0ull),
     });
   }
 
@@ -568,8 +561,6 @@ class ABISanStreamer : public MCAsmStreamer {
 
   void emit_taint_check_epilogue() {
     emit_instructions({
-        // leave
-        MCInstBuilder(X86::LEAVE),
         // pop rax // (This could be omitted if all taint checks are full-width)
         MCInstBuilder(X86::POP64r).addReg(X86::RAX),
     });
@@ -579,6 +570,7 @@ class ABISanStreamer : public MCAsmStreamer {
     MCContext &Ctx = getContext();
     MCRegisterInfo const &MRI = *Ctx.getRegisterInfo();
 
+    // If the register is full-width, this could be a mov instead.
     emit_instructions(
         {// and byte ptr [rip + __abisan_taint_state + TAINT_STATE_$REG],
          // ~TAINT_MASK($REG)
@@ -623,31 +615,45 @@ class ABISanStreamer : public MCAsmStreamer {
              .addImm(0xff)});
   }
 
-  void emit_call_instrumentation() {
+  void emit_call_prologue() {
     MCContext &Ctx = getContext();
-    // TODO: if this call is not to an ABI-compliant function, then
-    // we really shouldn't be clobbering r11 here.
-    // Maybe support a symbol blacklist?
-    emit_instructions(
-        {// lea r11, [rip]
-         MCInstBuilder(X86::LEA64r)
-             .addReg(X86::R11)
-             .addReg(X86::RIP)
-             .addReg(1 /* scale */)
-             .addReg(0 /* index */)
-             .addImm(0 /* displacement */)
-             .addReg(0 /* segment register */),
-         // mov qword ptr [rip + __abisan_last_instrumented_call], r11
-         MCInstBuilder(X86::MOV64rm)
-             .addReg(X86::R11)
-             .addReg(X86::RIP)
-             .addImm(1 /* scale */)
-             .addReg(0 /* index */)
-             .addExpr(MCSymbolRefExpr::create(
-                 Ctx.getOrCreateSymbol("__abisan_last_instrumented_call"), Ctx))
-             .addReg(0 /* segment register */)
 
-        });
+    std::string symbol_name("__abisan_call_");
+    symbol_name += std::to_string(num_instrumented_calls);
+
+    emit_instructions({
+        // push r11
+        MCInstBuilder(X86::PUSH64r).addReg(X86::R11),
+        // lea r11, [__abisan_call_$num_instrumented_calls]
+        MCInstBuilder(X86::LEA64r)
+            .addReg(X86::R11)
+            .addReg(X86::RIP)
+            .addReg(1 /* scale */)
+            .addReg(0 /* index */)
+            .addExpr(MCSymbolRefExpr::create(
+                Ctx.getOrCreateSymbol(symbol_name.c_str()), Ctx))
+            .addReg(0 /* segment register */),
+        // mov qword ptr [rip + __abisan_last_instrumented_retaddr], r11
+        MCInstBuilder(X86::MOV64mr)
+            .addReg(X86::RIP)
+            .addImm(1 /* scale */)
+            .addReg(0 /* index */)
+            .addExpr(MCSymbolRefExpr::create(
+                Ctx.getOrCreateSymbol("__abisan_last_instrumented_retaddr"),
+                Ctx))
+            .addReg(0 /* segment register */)
+            .addReg(X86::R11),
+        // pop r11
+        MCInstBuilder(X86::POP64r).addReg(X86::R11),
+    });
+  }
+
+  void emit_call_epilogue() {
+    MCContext &Ctx = getContext();
+    std::string symbol_name("__abisan_call_");
+    symbol_name += std::to_string(num_instrumented_calls);
+    MCAsmStreamer::emitLabel(Ctx.getOrCreateSymbol(symbol_name.c_str()));
+    num_instrumented_calls++;
   }
 
   void emit_comments(MCInst const &inst) {
@@ -771,12 +777,16 @@ public:
     }
 
     if (CALL_OPCODES.contains(inst.getOpcode())) {
-      emit_call_instrumentation();
+      emit_call_prologue();
     }
 
     // emit_comments(inst);
 
     emit_instructions({inst});
+
+    if (CALL_OPCODES.contains(inst.getOpcode())) {
+      emit_call_epilogue();
+    }
 
     // Remove the undirtied registers from dirty
     for (auto const &reg : get_undirtied_registers(inst, MID, MRI)) {

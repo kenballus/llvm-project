@@ -6,7 +6,7 @@
 
 #include "abisan_runtime.h"
 
-void *__abisan_last_instrumented_call;
+void *__abisan_last_instrumented_retaddr;
 
 struct shadow_stack_frame {
   void *retaddr;
@@ -82,23 +82,29 @@ static_assert(TAINT_STATE_R15 == offsetof(struct taint_state, r15));
 static_assert(TAINT_STATE_RBP == offsetof(struct taint_state, rbp));
 static_assert(TAINT_STATE_EFLAGS == offsetof(struct taint_state, eflags));
 
-struct taint_state __abisan_taint_state = {.rax = 0xff,
-                                           .rbx = 0xff,
+struct taint_state __abisan_taint_state = {.rax = 0,
+                                           .rbx = 0,
                                            .rcx = 0,
                                            .rdx = 0,
                                            .rdi = 0,
                                            .rsi = 0,
                                            .r8 = 0,
                                            .r9 = 0,
-                                           .r10 = 0xff,
-                                           .r11 = 0xff,
-                                           .r12 = 0xff,
-                                           .r13 = 0xff,
-                                           .r14 = 0xff,
-                                           .r15 = 0xff,
-                                           .rbp = 0xff};
+                                           .r10 = 0,
+                                           .r11 = 0,
+                                           .r12 = 0,
+                                           .r13 = 0,
+                                           .r14 = 0,
+                                           .r15 = 0,
+                                           .rbp = 0};
 
 #define ABISAN_ERROR_START "\x1b[0;31mABISanitizer: "
+
+[[noreturn]] void __abisan_fail_df_set(void) {
+  fprintf(stderr, ABISAN_ERROR_START
+          "The DF flag was set at function entry/exit.\x1b[0m\n");
+  exit(EXIT_FAILURE);
+}
 
 [[noreturn]] void
 __abisan_fail_stack_misalignment(struct shadow_stack_frame const *const frame) {
@@ -110,10 +116,10 @@ __abisan_fail_stack_misalignment(struct shadow_stack_frame const *const frame) {
   exit(EXIT_FAILURE);
 }
 
-[[noreturn]] static void
-abisan_fail_clobber(char const *const clobbered_register,
-                    uint64_t const clobbered_value,
-                    struct shadow_stack_frame const *const frame) {
+[[noreturn]] void
+__abisan_fail_clobber(char const *const clobbered_register,
+                      uint64_t const clobbered_value,
+                      struct shadow_stack_frame const *const frame) {
   fprintf(stderr,
           ABISAN_ERROR_START
           "%s clobbered with 0x%" PRIx64
@@ -133,114 +139,7 @@ abisan_fail_clobber(char const *const clobbered_register,
   exit(EXIT_FAILURE);
 }
 
-#define ABISAN_FAIL_CLOBBER_DEF(reg)                                           \
-  [[noreturn]] void __abisan_fail_clobber_##reg(                               \
-      struct shadow_stack_frame const *const frame, uint64_t reg) {            \
-    abisan_fail_clobber(#reg, reg, frame);                                     \
-  }
-
-ABISAN_FAIL_CLOBBER_DEF(rbx)
-ABISAN_FAIL_CLOBBER_DEF(rbp)
-ABISAN_FAIL_CLOBBER_DEF(rsp)
-ABISAN_FAIL_CLOBBER_DEF(r12)
-ABISAN_FAIL_CLOBBER_DEF(r13)
-ABISAN_FAIL_CLOBBER_DEF(r14)
-ABISAN_FAIL_CLOBBER_DEF(r15)
-ABISAN_FAIL_CLOBBER_DEF(x87cw)
-ABISAN_FAIL_CLOBBER_DEF(fs)
-ABISAN_FAIL_CLOBBER_DEF(mxcsr)
-
-[[noreturn]] void __abisan_fail_mov_below_rsp(void) {
-  fprintf(stderr,
-          ABISAN_ERROR_START "You accessed below the redzone!\x1b[0m\n");
-  exit(EXIT_FAILURE);
-}
-
-[[noreturn]] void abisan_fail_taint(char const *const r) {
+[[noreturn]] void __abisan_fail_taint(char const *const r) {
   fprintf(stderr, ABISAN_ERROR_START "You accessed a tainted %s.\x1b[0m\n", r);
   exit(EXIT_FAILURE);
 }
-
-#define ABISAN_FAIL_TAINT_DEF(reg)                                             \
-  [[noreturn]] void __abisan_fail_taint_##reg(void) { abisan_fail_taint(#reg); }
-
-ABISAN_FAIL_TAINT_DEF(rax)
-ABISAN_FAIL_TAINT_DEF(eax)
-ABISAN_FAIL_TAINT_DEF(ax)
-ABISAN_FAIL_TAINT_DEF(ah)
-ABISAN_FAIL_TAINT_DEF(al)
-
-ABISAN_FAIL_TAINT_DEF(rbx)
-ABISAN_FAIL_TAINT_DEF(ebx)
-ABISAN_FAIL_TAINT_DEF(bx)
-ABISAN_FAIL_TAINT_DEF(bh)
-ABISAN_FAIL_TAINT_DEF(bl)
-
-ABISAN_FAIL_TAINT_DEF(rcx)
-ABISAN_FAIL_TAINT_DEF(ecx)
-ABISAN_FAIL_TAINT_DEF(cx)
-ABISAN_FAIL_TAINT_DEF(ch)
-ABISAN_FAIL_TAINT_DEF(cl)
-
-ABISAN_FAIL_TAINT_DEF(rdx)
-ABISAN_FAIL_TAINT_DEF(edx)
-ABISAN_FAIL_TAINT_DEF(dx)
-ABISAN_FAIL_TAINT_DEF(dh)
-ABISAN_FAIL_TAINT_DEF(dl)
-
-ABISAN_FAIL_TAINT_DEF(rdi)
-ABISAN_FAIL_TAINT_DEF(edi)
-ABISAN_FAIL_TAINT_DEF(di)
-ABISAN_FAIL_TAINT_DEF(dil)
-
-ABISAN_FAIL_TAINT_DEF(rsi)
-ABISAN_FAIL_TAINT_DEF(esi)
-ABISAN_FAIL_TAINT_DEF(si)
-ABISAN_FAIL_TAINT_DEF(sil)
-
-ABISAN_FAIL_TAINT_DEF(r8)
-ABISAN_FAIL_TAINT_DEF(r8d)
-ABISAN_FAIL_TAINT_DEF(r8w)
-ABISAN_FAIL_TAINT_DEF(r8b)
-
-ABISAN_FAIL_TAINT_DEF(r9)
-ABISAN_FAIL_TAINT_DEF(r9d)
-ABISAN_FAIL_TAINT_DEF(r9w)
-ABISAN_FAIL_TAINT_DEF(r9b)
-
-ABISAN_FAIL_TAINT_DEF(r10)
-ABISAN_FAIL_TAINT_DEF(r10d)
-ABISAN_FAIL_TAINT_DEF(r10w)
-ABISAN_FAIL_TAINT_DEF(r10b)
-
-ABISAN_FAIL_TAINT_DEF(r11)
-ABISAN_FAIL_TAINT_DEF(r11d)
-ABISAN_FAIL_TAINT_DEF(r11w)
-ABISAN_FAIL_TAINT_DEF(r11b)
-
-ABISAN_FAIL_TAINT_DEF(r12)
-ABISAN_FAIL_TAINT_DEF(r12d)
-ABISAN_FAIL_TAINT_DEF(r12w)
-ABISAN_FAIL_TAINT_DEF(r12b)
-
-ABISAN_FAIL_TAINT_DEF(r13)
-ABISAN_FAIL_TAINT_DEF(r13d)
-ABISAN_FAIL_TAINT_DEF(r13w)
-ABISAN_FAIL_TAINT_DEF(r13b)
-
-ABISAN_FAIL_TAINT_DEF(r14)
-ABISAN_FAIL_TAINT_DEF(r14d)
-ABISAN_FAIL_TAINT_DEF(r14w)
-ABISAN_FAIL_TAINT_DEF(r14b)
-
-ABISAN_FAIL_TAINT_DEF(r15)
-ABISAN_FAIL_TAINT_DEF(r15d)
-ABISAN_FAIL_TAINT_DEF(r15w)
-ABISAN_FAIL_TAINT_DEF(r15b)
-
-ABISAN_FAIL_TAINT_DEF(rbp)
-ABISAN_FAIL_TAINT_DEF(ebp)
-ABISAN_FAIL_TAINT_DEF(bp)
-ABISAN_FAIL_TAINT_DEF(bpl)
-
-ABISAN_FAIL_TAINT_DEF(eflags)
