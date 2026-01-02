@@ -4,18 +4,28 @@
 #include "AMD64ABISanInfo.h" // for AMD64ABISanInfo
 #include "X86InstrInfo.h"    // for X86::* opcode constants
 #include "X86RegisterInfo.h" // for X86::* register constants
-#include "llvm/ABISan/AMD64LinuxUserspaceConstants.h" // for TAINT_STATE_*
-#include "llvm/ADT/DenseSet.h"                        // for DenseSet
-#include "llvm/MC/MCInst.h"                           // for MCInst
-#include "llvm/MC/MCRegister.h"                       // for MCRegister
-#include <cassert>                                    // for assert
-#include <cstdint>                                    // for uint8_t
+#include "llvm/ABISan/AMD64LinuxUserspaceConstants.h" // for TAINT_STATE_*, REDZONE_SIZE, SHADOW_STACK_FRAME_SIZE
+#include "llvm/ADT/DenseSet.h"  // for DenseSet
+#include "llvm/MC/MCInst.h"     // for MCInst
+#include "llvm/MC/MCRegister.h" // for MCRegister
+#include <cassert>              // for assert
+#include <cstdint>              // for uint8_t
 
 namespace llvm {
 
 class AMD64LinuxUserspaceABISanInfo final : public AMD64ABISanInfo {
 public:
   using AMD64ABISanInfo::AMD64ABISanInfo;
+
+  unsigned getShadowStackFrameSize() const override {
+    return SHADOW_STACK_FRAME_SIZE;
+  }
+
+  unsigned getShadowStackRetAddrOffset() const override {
+    return FRAME_RETADDR;
+  }
+
+  unsigned getRedzoneSize() const override { return REDZONE_SIZE; }
 
   DenseSet<MCRegister> const &getMainArgumentSuperregisters() const override {
     static DenseSet<MCRegister> const MainArgumentSuperregisters{

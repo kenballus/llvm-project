@@ -6,10 +6,9 @@
 #include "MCTargetDesc/X86MCAsmInfo.h" // for X86::S_GOTTPOFF, S_None
 #include "X86InstrInfo.h"              // for X86::* opcode constants
 #include "X86RegisterInfo.h"           // for X86::* register constants
-#include "llvm/ABISan/AMD64LinuxUserspaceConstants.h" // for SHADOW_STACK_FRAME_SIZE, FRAME_RETADDR
-#include "llvm/ADT/SmallVector.h"                     // for SmallVector
-#include "llvm/ADT/Twine.h"                           // for Twine
-#include "llvm/MC/MCContext.h"                        // for MCContext
+#include "llvm/ADT/SmallVector.h"      // for SmallVector
+#include "llvm/ADT/Twine.h"            // for Twine
+#include "llvm/MC/MCContext.h"         // for MCContext
 #include "llvm/MC/MCExpr.h" // for MCSymbolRefExpr, MCBinaryExpr, MCConstantExpr
 #include "llvm/MC/MCInst.h" // for MCInst
 #include "llvm/MC/MCInstBuilder.h"  // for MCInstBuilder
@@ -28,6 +27,29 @@ private:
   MCInst const RestoreRedzone;
 
   MCSymbol const *CurrentSymbol;
+
+  SmallVector<std::variant<MCInst, MCSymbol *>>
+  generateTaintCopy(MCRegister const Src, MCRegister Dst) {
+    SmallVector<std::variant<MCInst, MCSymbol *>> Result;
+    unsigned DstSize = ABIInfo.getRegisterSize(Dst);
+    unsigned SrcSize = ABIInfo.getRegisterSize(Src);
+    assert(DstSize >= SrcSize);
+    if (DstSize != SrcSize) {
+      // If dst is bigger than src, we're looking at an extending move.
+      // So clear the destination's taint state, then copy src's into its lower
+      // bits.
+      Result.append(generateTaintClear(Dst));
+      Dst = ABIInfo.getMatchingRegister(Dst, Src);
+      assert(Dst != 0);
+    }
+
+    Result.push_back(
+        MCInstBuilder(X86::CALL64pcrel32)
+            .addExpr(MCSymbolRefExpr::create(
+                Ctx.getOrCreateSymbol(ABIInfo.getTaintCopySymbolName(Src, Dst)),
+                Ctx)));
+    return Result;
+  }
 
   SmallVector<std::variant<MCInst, MCSymbol *>>
   generateTaintClear(MCRegister const Reg) {
@@ -245,15 +267,15 @@ private:
               .addExpr(MCSymbolRefExpr::create(getNextLocalLabel(), Ctx))
               .addImm(X86::COND_E),
       });
-      bool HaveEmittedTaintClear = false;
+      bool HaveEmittedTaintUpdate = false;
       for (auto const Reg : ABIInfo.getRetvalSuperregisters()) {
-        if (!HaveEmittedTaintClear) {
+        if (!HaveEmittedTaintUpdate) {
           Result.push_back(SaveRedzone);
-          HaveEmittedTaintClear = true;
+          HaveEmittedTaintUpdate = true;
         }
         Result.append(generateTaintClear(Reg));
       }
-      if (HaveEmittedTaintClear) { // that is, we emitted a taint clear
+      if (HaveEmittedTaintUpdate) {
         Result.push_back(RestoreRedzone);
       }
       Result.push_back(dispenseLocalLabel());
@@ -349,14 +371,14 @@ public:
                         .addReg(X86::RSP /* base */)
                         .addImm(1 /* scale */)
                         .addReg(X86::NoRegister /* index */)
-                        .addImm(-REDZONE_SIZE /* displacement */)
+                        .addImm(-ABIInfo.getRedzoneSize() /* displacement */)
                         .addReg(X86::NoRegister /* segment register */)),
         RestoreRedzone(MCInstBuilder(X86::LEA64r)
                            .addReg(X86::RSP)
                            .addReg(X86::RSP /* base */)
                            .addImm(1 /* scale */)
                            .addReg(X86::NoRegister /* index */)
-                           .addImm(REDZONE_SIZE /* displacement */)
+                           .addImm(ABIInfo.getRedzoneSize() /* displacement */)
                            .addReg(X86::NoRegister /* segment register */)) {}
 
   SmallVector<std::variant<MCInst, MCSymbol *>>
@@ -399,11 +421,11 @@ public:
     // Emit taint instructions for each tainted register
     // This needs to happen after the instruction is emitted because it
     // won't work for call otherwise.
-    bool HaveEmittedTaintSetOrClear = false;
+    bool HaveSavedRedzone = false;
     for (auto const TaintedReg : ABIInfo.getDirtiedSuperregisters(Inst)) {
       if (getRegisterStatus(TaintedReg) != ABISanRegisterStatus::Dirty) {
-        if (!HaveEmittedTaintSetOrClear) {
-          HaveEmittedTaintSetOrClear = true;
+        if (!HaveSavedRedzone) {
+          HaveSavedRedzone = true;
           Result.push_back(SaveRedzone);
         }
         Result.append(generateTaintSet(TaintedReg));
@@ -413,14 +435,27 @@ public:
     for (auto const UntaintedReg : ABIInfo.getCleanedSuperregisters(Inst)) {
       if (ABIInfo.isTaintTracked(UntaintedReg) &&
           getRegisterStatus(UntaintedReg) != ABISanRegisterStatus::Clean) {
-        if (!HaveEmittedTaintSetOrClear) {
-          HaveEmittedTaintSetOrClear = true;
+        if (!HaveSavedRedzone) {
+          HaveSavedRedzone = true;
           Result.push_back(SaveRedzone);
         }
         Result.append(generateTaintClear(UntaintedReg));
       }
     }
-    if (HaveEmittedTaintSetOrClear) { // A register was tainted/taint-cleared
+    if (ABIInfo.needsTaintCopy(Inst)) {
+      if (!HaveSavedRedzone) {
+        HaveSavedRedzone = true;
+        Result.push_back(SaveRedzone);
+      }
+      auto const ReadSuperregisters = ABIInfo.getReadSuperregisters(Inst);
+      auto const WrittenSuperregisters = ABIInfo.getWrittenSuperregisters(Inst);
+      assert(ReadSuperregisters.size() == 1);
+      assert(WrittenSuperregisters.size() == 1);
+      auto const Src = *ReadSuperregisters.begin();
+      auto const Dst = *WrittenSuperregisters.begin();
+      Result.append(generateTaintCopy(Src, Dst));
+    }
+    if (HaveSavedRedzone) { // A register was tainted/taint-cleared/taint-copied
       Result.push_back(RestoreRedzone);
     }
 
@@ -497,8 +532,8 @@ public:
                  .addReg(X86::R11 /* base */)
                  .addImm(1 /* scale */)
                  .addReg(X86::NoRegister /* index */)
-                 .addImm(FRAME_RETADDR -
-                         SHADOW_STACK_FRAME_SIZE /* displacement */)
+                 .addImm(ABIInfo.getShadowStackRetAddrOffset() -
+                         ABIInfo.getShadowStackFrameSize() /* displacement */)
                  .addReg(X86::NoRegister /* segment register */),
              MCInstBuilder(X86::PUSH64r).addReg(X86::RAX),
              // Load the address of the instruction after the last

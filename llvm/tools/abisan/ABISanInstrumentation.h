@@ -112,6 +112,65 @@ protected:
       setSubregisterStatus(Superreg, ABISanRegisterStatus::Unknown, Loc);
       setSuperregisterStatus(Superreg, ABISanRegisterStatus::Unknown, Loc);
     }
+
+    if (ABIInfo.needsTaintCopy(Inst)) {
+      auto const ReadSuperregisters = ABIInfo.getReadSuperregisters(Inst);
+      auto const WrittenSuperregisters = ABIInfo.getWrittenSuperregisters(Inst);
+      assert(ReadSuperregisters.size() == 1);
+      assert(WrittenSuperregisters.size() == 1);
+      auto const Src = *ReadSuperregisters.begin();
+      auto const Dst = *WrittenSuperregisters.begin();
+
+      assert(ABIInfo.getRegisterSize(Dst) >= ABIInfo.getRegisterSize(Src));
+      // Copy the stati of registers with obvious correspondents
+      // If any are dirty, then the status of the extended part of the
+      // destination (if any) will also be dirty. If any are unknown and none
+      // are dirty, then it'll be unknown. Otherwise, clean.
+      ABISanRegisterStatus StatusForExtendedRegisters =
+          ABISanRegisterStatus::Clean;
+      for (auto const SrcSubreg : MRI.subregs_inclusive(Src)) {
+        auto const DstSubreg = ABIInfo.getMatchingRegister(Dst, SrcSubreg);
+        if (DstSubreg == 0) {
+          continue;
+        }
+        assert(MRI.isSubRegisterEq(Dst, DstSubreg));
+        auto const SrcSubregStatus = getRegisterStatus(SrcSubreg);
+        switch (SrcSubregStatus) {
+        case ABISanRegisterStatus::Clean:
+          break;
+        case ABISanRegisterStatus::Unknown:
+          if (StatusForExtendedRegisters == ABISanRegisterStatus::Clean) {
+            // Unknown beats clean
+            StatusForExtendedRegisters = ABISanRegisterStatus::Unknown;
+          }
+          break;
+        case ABISanRegisterStatus::Dirty:
+          // Dirty beats everything
+          StatusForExtendedRegisters = ABISanRegisterStatus::Dirty;
+          break;
+        }
+        setRegisterStatus(DstSubreg, SrcSubregStatus, Loc);
+      }
+
+      for (auto const DstSubreg : MRI.subregs_inclusive(Dst)) {
+        auto SrcMatch = ABIInfo.getMatchingRegister(Src, DstSubreg);
+        if (SrcMatch == 0) {
+          // No corresponding register. e.g., looking for ah match in rdi
+          // Use state from smallest superregister with a match instead
+          auto SmallestMatchingSuper = DstSubreg;
+          do {
+            SmallestMatchingSuper =
+                ABIInfo.getSmallestSuperregister(SmallestMatchingSuper);
+            SrcMatch = ABIInfo.getMatchingRegister(Src, SmallestMatchingSuper);
+          } while (SrcMatch == 0);
+          setRegisterStatus(DstSubreg, getRegisterStatus(SrcMatch), Loc);
+        } else if (!MRI.isSubRegisterEq(Src, SrcMatch)) {
+          // Corresponding register is out of range indicating
+          // (sign|zero)-extension
+          setRegisterStatus(DstSubreg, StatusForExtendedRegisters, Loc);
+        }
+      }
+    }
   }
 
   void updateRegisterStatuses(MCSymbol const &Symbol, SMLoc Loc) {
