@@ -17,6 +17,7 @@
 #include "llvm/Support/Casting.h"   // for cast
 #include <algorithm>                // for std::max
 #include <cassert>                  // for assert
+#include <climits>                  // for UINT_MAX
 #include <cstdint>                  // for uint8_t
 
 namespace llvm {
@@ -65,10 +66,16 @@ protected:
   deduplicateSubregisters(DenseSet<MCRegister> const Regs) const {
     DenseSet<MCRegister> Result;
     for (auto Reg : Regs) {
-      for (auto Subreg : MRI.subregs(Reg)) {
-        Result.erase(Subreg);
+      bool FoundSuper = false;
+      for (auto PotentialSuper : Regs) {
+        if (MRI.isSubRegister(PotentialSuper, Reg)) {
+          FoundSuper = true;
+          break;
+        }
       }
-      Result.insert(Reg);
+      if (!FoundSuper) {
+        Result.insert(Reg);
+      }
     }
     return Result;
   }
@@ -94,6 +101,12 @@ public:
 
   virtual DenseSet<MCRegister> const &getArgumentSuperregisters() const = 0;
 
+  virtual unsigned getRedzoneSize() const = 0;
+
+  virtual unsigned getShadowStackRetAddrOffset() const = 0;
+
+  virtual unsigned getShadowStackFrameSize() const = 0;
+
   virtual unsigned getRegisterSize(MCRegister const Reg) const {
     unsigned Result = 0;
     for (auto const &RC : MRI.regclasses()) {
@@ -105,29 +118,30 @@ public:
     return Result;
   }
 
-  Twine getMemoryCheckSymbolName(void) const { return "__abisan_memory_check"; }
-
-  Twine getTaintClearSymbolName(MCRegister const Reg) const {
-    return Twine("__abisan_taint_clear_").concat(MRI.getName(Reg));
+  std::string getMemoryCheckSymbolName(void) const {
+    return "__abisan_memory_check";
   }
 
-  Twine getTaintCopySymbolName(MCRegister const Reg) const {
-    return Twine("__abisan_taint_copy_from_").concat(MRI.getName(Reg));
+  std::string getTaintClearSymbolName(MCRegister const Reg) const {
+    return Twine("__abisan_taint_clear_").concat(MRI.getName(Reg)).str();
   }
 
-  Twine getTaintCheckSymbolName(MCRegister const Reg) const {
-    return Twine("__abisan_taint_check_").concat(MRI.getName(Reg));
+  std::string getTaintCheckSymbolName(MCRegister const Reg) const {
+    return Twine("__abisan_taint_check_").concat(MRI.getName(Reg)).str();
   }
 
-  Twine getTaintCopySymbolName(MCRegister const Dst, MCRegister const Src) {
+  std::string getTaintCopySymbolName(MCRegister const Dst,
+                                     MCRegister const Src) const {
+    assert(getMatchingRegister(Dst, Src) == Dst);
     return Twine("__abisan_taint_copy_from_")
         .concat(MRI.getName(Src))
         .concat("_to_")
-        .concat(MRI.getName(Dst));
+        .concat(MRI.getName(Dst))
+        .str();
   }
 
-  Twine getTaintSetSymbolName(MCRegister const Reg) const {
-    return Twine("__abisan_taint_set_").concat(MRI.getName(Reg));
+  std::string getTaintSetSymbolName(MCRegister const Reg) const {
+    return Twine("__abisan_taint_set_").concat(MRI.getName(Reg)).str();
   }
 
   bool accessesMemory(MCInst const &Inst) const {
@@ -216,13 +230,16 @@ public:
 
   DenseSet<MCRegister> const
   getCleanedSuperregisters(MCInst const &Inst) const {
-    if (unknownsWrittenRegisters(Inst)) {
+    // Returns the registers that are unconditionally cleaned by this
+    // instruction
+    if (unknownsWrittenRegisters(Inst) || needsTaintCopy(Inst)) {
       return {};
     }
     return getWrittenSuperregisters(Inst);
   }
 
   MCRegister getLargestSuperregister(MCRegister const Reg) const {
+    // Inclusive
     MCRegister Result = Reg;
     unsigned ResultSize = getRegisterSize(Reg);
     for (auto const Superreg : MRI.superregs(Reg)) {
@@ -233,6 +250,34 @@ public:
       }
     }
     return Result;
+  }
+
+  MCRegister getSmallestSuperregister(MCRegister const Reg) const {
+    // Exclusive
+    MCRegister Result = Reg;
+    unsigned ResultSize = UINT_MAX;
+    for (auto const Superreg : MRI.superregs(Reg)) {
+      unsigned const SuperSize = getRegisterSize(Superreg);
+      if (SuperSize < ResultSize) {
+        Result = Superreg;
+        ResultSize = SuperSize;
+      }
+    }
+    assert(ResultSize != UINT_MAX && Result != Reg);
+    return Result;
+  }
+
+  MCRegister getMatchingRegister(MCRegister const Super,
+                                 MCRegister const Match) const {
+    // Returns the (super|sub)register of Super that corresponds to Match.
+    // e.g., getMatchingRegister(X86::AX, X86::DL) returns X86::AL
+    // Returns 0 if there is no corresponding register.
+    auto const SuperSuper = getLargestSuperregister(Super);
+    auto const SuperMatch = getLargestSuperregister(Match);
+    assert(getRegisterSize(SuperSuper) == getRegisterSize(SuperMatch));
+    auto const SubRegIndex = MRI.getSubRegIndex(SuperMatch, Match);
+    return SubRegIndex != 0 ? MRI.getSubReg(SuperSuper, SubRegIndex)
+                            : SuperSuper;
   }
 
   MCRegister getSuperregister(MCRegister const Reg, unsigned const Size) const {

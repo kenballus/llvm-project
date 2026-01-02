@@ -64,12 +64,6 @@ public:
     return OpcodesThatMakeWrittenRegistersUnknown.contains(Inst.getOpcode());
   }
 
-  bool needsTaintCopy(MCInst const &Inst) const override {
-    static DenseSet<unsigned> OpcodesThatTriggerTaintCopy{
-        X86::MOV8rr, X86::MOV16rr, X86::MOV32rr, X86::MOV64rr};
-    return OpcodesThatTriggerTaintCopy.contains(Inst.getOpcode());
-  }
-
   virtual DenseSet<MCRegister>
   getWrittenSuperregisters(MCInst const &Inst) const override {
     auto Result = ABISanInfo::getWrittenSuperregisters(Inst);
@@ -83,7 +77,7 @@ public:
     SmallVector<MCRegister> ToInsert;
     for (auto const Reg : Result) {
       if (ZeroExtendedRegisters.contains(Reg)) {
-        ToInsert.push_back(getSuperregister(Reg, 64));
+        ToInsert.push_back(getLargestSuperregister(Reg));
       }
     }
     Result.insert(ToInsert.begin(), ToInsert.end());
@@ -98,21 +92,47 @@ public:
     return ABISanInfo::getReadSuperregisters(Inst);
   }
 
+  bool needsTaintCopy(MCInst const &Inst) const override {
+    static DenseSet<unsigned> OpcodesThatTriggerTaintCopy{
+        X86::MOV8rr,      X86::MOV16rr,     X86::MOV32rr,     X86::MOV64rr,
+        X86::MOVZX16rr8,  X86::MOVZX32rr16, X86::MOVZX32rr8,  X86::MOVZX64rr16,
+        X86::MOVZX64rr8,  X86::MOVSX16rr32, X86::MOVSX16rr8,  X86::MOVSX32rr16,
+        X86::MOVSX32rr32, X86::MOVSX32rr8,  X86::MOVSX64rr16, X86::MOVSX64rr32,
+        X86::MOVSX64rr8};
+
+    if (!OpcodesThatTriggerTaintCopy.contains(Inst.getOpcode())) {
+      return false;
+    }
+
+    auto const ReadSuperregisters = getReadSuperregisters(Inst);
+    auto const WrittenSuperregisters = getWrittenSuperregisters(Inst);
+
+    assert(ReadSuperregisters.size() == 1);
+    assert(WrittenSuperregisters.size() == 1);
+    auto const Src = *ReadSuperregisters.begin();
+    auto const Dst = *WrittenSuperregisters.begin();
+    return isTaintTracked(Src) && isTaintTracked(Dst);
+  }
+
   DenseSet<MCRegister>
   getRequiredCleanSuperregisters(MCInst const &Inst) const override {
-    static DenseSet<unsigned> const InstructionsThatCanUseDirtyData{
-        X86::PUSH16i,   X86::PUSH16i8, X86::PUSH16r,   X86::PUSH16rmm,
-        X86::PUSH16rmr, X86::PUSH2,    X86::PUSH2P,    X86::PUSH32i,
-        X86::PUSH32i8,  X86::PUSH32r,  X86::PUSH32rmm, X86::PUSH32rmr,
-        X86::PUSH64i32, X86::PUSH64i8, X86::PUSH64r,   X86::PUSH64rmm,
-        X86::PUSH64rmr, X86::PUSHA16,  X86::PUSHA32,   X86::PUSHCS16,
-        X86::PUSHCS32,  X86::PUSHDS16, X86::PUSHDS32,  X86::PUSHES16,
-        X86::PUSHES32,  X86::PUSHF16,  X86::PUSHF32,   X86::PUSHF64,
-        X86::PUSHFS16,  X86::PUSHFS32, X86::PUSHFS64,  X86::PUSHGS16,
-        X86::PUSHGS32,  X86::PUSHGS64, X86::PUSHP64r,  X86::PUSHSS16,
-        X86::PUSHSS32,  X86::LEAVE,    X86::LEAVE64};
+    static DenseSet<unsigned> const OpcodesThatCanUseDirtyData{
+        X86::PUSH16i,     X86::PUSH16i8,    X86::PUSH16r,     X86::PUSH16rmm,
+        X86::PUSH16rmr,   X86::PUSH2,       X86::PUSH2P,      X86::PUSH32i,
+        X86::PUSH32i8,    X86::PUSH32r,     X86::PUSH32rmm,   X86::PUSH32rmr,
+        X86::PUSH64i32,   X86::PUSH64i8,    X86::PUSH64r,     X86::PUSH64rmm,
+        X86::PUSH64rmr,   X86::PUSHA16,     X86::PUSHA32,     X86::PUSHCS16,
+        X86::PUSHCS32,    X86::PUSHDS16,    X86::PUSHDS32,    X86::PUSHES16,
+        X86::PUSHES32,    X86::PUSHF16,     X86::PUSHF32,     X86::PUSHF64,
+        X86::PUSHFS16,    X86::PUSHFS32,    X86::PUSHFS64,    X86::PUSHGS16,
+        X86::PUSHGS32,    X86::PUSHGS64,    X86::PUSHP64r,    X86::PUSHSS16,
+        X86::PUSHSS32,    X86::LEAVE,       X86::LEAVE64,     X86::MOV8rr,
+        X86::MOV16rr,     X86::MOV32rr,     X86::MOV64rr,     X86::MOVZX16rr8,
+        X86::MOVZX32rr16, X86::MOVZX32rr8,  X86::MOVZX64rr16, X86::MOVZX64rr8,
+        X86::MOVSX16rr32, X86::MOVSX16rr8,  X86::MOVSX32rr16, X86::MOVSX32rr32,
+        X86::MOVSX32rr8,  X86::MOVSX64rr16, X86::MOVSX64rr32, X86::MOVSX64rr8};
     unsigned const Opcode = Inst.getOpcode();
-    if (InstructionsThatCanUseDirtyData.contains(Opcode)) {
+    if (OpcodesThatCanUseDirtyData.contains(Opcode)) {
       return {};
     }
 
