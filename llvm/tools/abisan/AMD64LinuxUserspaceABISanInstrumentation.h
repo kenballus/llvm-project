@@ -569,9 +569,11 @@ public:
              MCInstBuilder(X86::JCC_1)
                  .addExpr(MCSymbolRefExpr::create(getNextLocalLabel(), Ctx))
                  .addImm(X86::COND_E)});
+        Result.push_back(SaveRedzone);
         for (auto const Reg : ABIInfo.getArgumentSuperregisters()) {
           Result.append(generateTaintClear(Reg));
         }
+        Result.push_back(RestoreRedzone);
         Result.push_back(dispenseLocalLabel());
       }
     }

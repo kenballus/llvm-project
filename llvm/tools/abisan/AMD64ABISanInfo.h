@@ -111,6 +111,12 @@ public:
     assert(WrittenSuperregisters.size() == 1);
     auto const Src = *ReadSuperregisters.begin();
     auto const Dst = *WrittenSuperregisters.begin();
+
+    if (Src == X86::AH || Src == X86::BH || Src == X86::CH || Src == X86::DH) {
+      // TODO
+      return false;
+    }
+
     return isTaintTracked(Src) && isTaintTracked(Dst);
   }
 

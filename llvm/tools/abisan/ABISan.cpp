@@ -68,6 +68,9 @@ static cl::opt<bool> Ignored2("noexecstack", cl::Hidden, cl::desc("Ignored"),
 static cl::opt<bool> Ignored3("v", cl::Hidden, cl::desc("Ignored"),
                               cl::cat(ABISanCat));
 
+static cl::opt<bool> Ignored4("g", cl::Hidden, cl::desc("Ignored"),
+                              cl::cat(ABISanCat));
+
 static cl::list<std::string> IncludeDirs("I",
                                          cl::desc("Directory of include files"),
                                          cl::value_desc("directory"),

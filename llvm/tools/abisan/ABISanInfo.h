@@ -177,10 +177,12 @@ public:
       if (Operand.isExpr()) {
         MCSymbolRefExpr const *SymbolRefExprOrNull =
             getMCSymbolRefExpr(*Operand.getExpr());
-        if (SymbolRefExprOrNull &&
-            NonABISymbolNames.contains(
-                SymbolRefExprOrNull->getSymbol().getName())) {
-          return false;
+        if (SymbolRefExprOrNull) {
+          auto const SymbolName = SymbolRefExprOrNull->getSymbol().getName();
+          if (SymbolName.starts_with(".L") ||
+              NonABISymbolNames.contains(SymbolName)) {
+            return false;
+          }
         }
       }
     }
