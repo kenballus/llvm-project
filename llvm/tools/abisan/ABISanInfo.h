@@ -130,8 +130,8 @@ public:
     return Twine("__abisan_taint_check_").concat(MRI.getName(Reg)).str();
   }
 
-  std::string getTaintCopySymbolName(MCRegister const Dst,
-                                     MCRegister const Src) const {
+  std::string getTaintCopySymbolName(MCRegister const Src,
+                                     MCRegister const Dst) const {
     assert(getMatchingRegister(Dst, Src) == Dst);
     return Twine("__abisan_taint_copy_from_")
         .concat(MRI.getName(Src))
