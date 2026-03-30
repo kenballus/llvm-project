@@ -118,10 +118,6 @@ public:
     return Result;
   }
 
-  std::string getMemoryCheckSymbolName(void) const {
-    return "__abisan_memory_check";
-  }
-
   std::string getTaintClearSymbolName(MCRegister const Reg) const {
     return Twine("__abisan_taint_clear_").concat(MRI.getName(Reg)).str();
   }
@@ -142,27 +138,6 @@ public:
 
   std::string getTaintSetSymbolName(MCRegister const Reg) const {
     return Twine("__abisan_taint_set_").concat(MRI.getName(Reg)).str();
-  }
-
-  bool accessesMemory(MCInst const &Inst) const {
-    auto const &MID = MCII.get(Inst.getOpcode());
-    for (auto const &Op : MID.operands()) {
-      if (Op.OperandType == MCOI::OPERAND_MEMORY) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  unsigned findMemoryOperand(MCInst const &Inst) const {
-    unsigned I = 0;
-    for (auto const &Op : MCII.get(Inst.getOpcode()).operands()) {
-      if (Op.OperandType == MCOI::OPERAND_MEMORY) {
-        return I;
-      }
-      I++;
-    }
-    assert(false);
   }
 
   bool isNonABICall(MCInst const &Inst) const {

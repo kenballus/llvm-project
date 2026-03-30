@@ -90,8 +90,6 @@ static_assert(TAINT_STATE_RFLAGS == offsetof(struct taint_state, rflags));
 
 extern thread_local struct taint_state __abisan_taint_state;
 
-void __abisan_fail_memory_check(void);
-
 void __abisan_fail_df_set(void);
 
 void __abisan_fail_stack_misalignment(void);
