@@ -239,48 +239,6 @@ __abisan_function_exit:
 
     ret
 
-.global __abisan_memory_check
-__abisan_memory_check:
-    // Expects that the caller saved the redzone and pushed rdi before calling
-    // Note that saving rdi in another way is not acceptable; it must be pushed.
-    // Checks whether the address in rdi goes below rsp - REDZONE_SIZE,
-    // but not so far below that it's fine, like in a heap access.
-    // |                 .                   |
-    // |                 .                   |
-    // |                 .                   |
-    // |this                                 |
-    // |                is                   |
-    // |                                 fine|
-    // | - - - - - - - - - - - - - - - - - - | <- rsp
-    // |         redzone (also fine)         |
-    // | - - - - - - - - - - - - - - - - - - | <- rsp - REDZONE_SIZE
-    // |this                                 |
-    // |                is                   |
-    // |                             not fine|
-    // |                 .                   |
-    // |                 .                   |
-    // |                 .                   |
-    // | - - - - - - - - - - - - - - - - - - | <- rsp - STACK_MAX
-    // |this                                 |
-    // |                is                   |
-    // |                                 fine|
-    // |                 .                   |
-    // |                 .                   |
-    // |                 .                   |
-    pushfq
-    sub rdi, rsp
-    sub rdi, 24 # For pushed rdi from caller, return addr, and pushed flags from us
-    add rdi, STACK_SIZE
-    cmp rdi, STACK_SIZE
-    ja 1f
-    push rbp
-    mov rbp, rsp
-    and rsp, -16
-    call __abisan_fail_memory_check
-1:
-    popfq
-    ret
-
 #define ABISAN_TAINT_COPY_DEF(dst, src, mask) \
 .global __abisan_taint_copy_from_##src##_to_##dst; \
 __abisan_taint_copy_from_##src##_to_##dst: ; \

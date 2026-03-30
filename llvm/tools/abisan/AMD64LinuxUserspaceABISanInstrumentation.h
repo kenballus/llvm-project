@@ -284,84 +284,6 @@ private:
     return Result;
   }
 
-  SmallVector<std::variant<MCInst, MCSymbol *>>
-  generateMemoryCheck(MCInst const &Inst) {
-    unsigned const I = ABIInfo.findMemoryOperand(Inst);
-    if (I + 4 >= Inst.getNumOperands()) {
-      // TODO: implicit memory operand (e.g., rep stosq)
-      return {};
-    }
-
-    auto const &Base = Inst.getOperand(I);
-    auto const &Scale = Inst.getOperand(I + 1);
-    auto const &Index = Inst.getOperand(I + 2);
-    auto const &Displacement = Inst.getOperand(I + 3);
-    auto const &Segment = Inst.getOperand(I + 4);
-
-    assert(Base.isReg());
-    assert(Scale.isImm());
-    assert(Index.isReg());
-    assert(Segment.isReg());
-    assert(Displacement.isImm() || Displacement.isExpr());
-
-    if (Base.getReg() == X86::SP || Base.getReg() == X86::SPL) {
-      // TODO: handle sp, spl-base addresses
-      // This is complicated because the instrumentation modifies rsp.
-      // We treat esp like rsp because the probability that you cross a 4GB
-      // boundary is really low
-      return {};
-    }
-
-    if (Segment.getReg() != X86::NoRegister) {
-      // TODO: handle segment overrides
-      // This is complicated because RDFSBASE and RDGSBASE are IvyBridge+.
-      return {};
-    }
-
-    if (Displacement.isExpr()) {
-      MCSymbolRefExpr const *SymbolRefExpr =
-          getMCSymbolRefExpr(*Displacement.getExpr());
-      if (SymbolRefExpr->getSpecifier() != X86::S_None) {
-        // TODO: handle specifiers.
-        // This is complicated because not all specifiers can be used with lea.
-        return {};
-      }
-    }
-
-    // If the base is rsp or esp, then we need to account for the fact that
-    // our instrumentation has affected it
-    unsigned const StackOffset =
-        Base.getReg() == X86::RSP || Base.getReg() == X86::ESP
-            ? REDZONE_SIZE + 8 // for saved RDI
-            : 0;
-
-    return {SaveRedzone,
-            MCInstBuilder(X86::PUSH64r).addReg(X86::RDI),
-            Displacement.isImm()
-                ? MCInstBuilder(X86::LEA64r)
-                      .addReg(X86::RDI)
-                      .addReg(Base.getReg())
-                      .addImm(Scale.getImm())
-                      .addReg(Index.getReg())
-                      .addImm(Displacement.getImm() + StackOffset)
-                      .addReg(X86::NoRegister)
-                : MCInstBuilder(X86::LEA64r)
-                      .addReg(X86::RDI)
-                      .addReg(Base.getReg())
-                      .addImm(Scale.getImm())
-                      .addReg(Index.getReg())
-                      .addExpr(MCBinaryExpr::createAdd(
-                          Displacement.getExpr(),
-                          MCConstantExpr::create(StackOffset, Ctx), Ctx))
-                      .addReg(X86::NoRegister),
-            MCInstBuilder(X86::CALL64pcrel32)
-                .addExpr(MCSymbolRefExpr::create(
-                    Ctx.getOrCreateSymbol(ABIInfo.getMemoryCheckSymbolName()),
-                    Ctx)),
-            MCInstBuilder(X86::POP64r).addReg(X86::RDI),
-            RestoreRedzone};
-  }
-
 public:
   AMD64LinuxUserspaceABISanInstrumentation(MCContext &Ctx,
                                            ABISanInfo const &ABIInfo)
@@ -384,10 +306,6 @@ public:
   SmallVector<std::variant<MCInst, MCSymbol *>>
   instrumentInstruction(MCInst const &Inst, SMLoc Loc) override {
     SmallVector<std::variant<MCInst, MCSymbol *>> Result;
-    // Check memory access
-    if (ABIInfo.accessesMemory(Inst)) {
-      Result.append(generateMemoryCheck(Inst));
-    }
 
     // Taint checking
     bool HaveMadeTaintCheck = true;

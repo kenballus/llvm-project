@@ -37,14 +37,6 @@ thread_local struct taint_state __abisan_taint_state = {.rax = 0,
 
 #define ABISAN_ERROR_START "\x1b[0;31mABISanitizer: "
 
-void __abisan_fail_memory_check(void) {
-  pthread_mutex_lock(&__abisan_mutex);
-  fprintf(stderr,
-          ABISAN_ERROR_START "Access below the red zone attempted!\x1b[0m\n");
-  fflush(stderr);
-  __asm__ volatile("ud2");
-}
-
 void __abisan_fail_df_set(void) {
   pthread_mutex_lock(&__abisan_mutex);
   fprintf(stderr, ABISAN_ERROR_START

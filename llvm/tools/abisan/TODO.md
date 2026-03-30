@@ -1,0 +1,8 @@
+- Support "pushing" into another register, like openssl does with rbx and r8
+    - Distinguish between written registers and cleaned registers
+    - Deal with movsx, movzx, and mov32, 32 (which is implicit zx)
+- Exempt rep nop from ecx/rcx checking
+- Fix the issue with `shrw bx` that shows up in musl asinhl.
+- Sometimes an instruction uses a dirty register, but the only register that gets written to is the one that was already dirty. This is arguably fine, and shows up in musl getdelim
+- Clean up main
+- Support CPUID, which conditionally reads/writes to/from different stuff based on rax
