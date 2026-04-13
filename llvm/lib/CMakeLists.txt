@@ -4,6 +4,7 @@ include(LLVM-Build)
 # CMakeLists.txt
 
 add_subdirectory(ABI)
+add_subdirectory(ABISanRuntime)
 add_subdirectory(IR)
 add_subdirectory(FuzzMutate)
 add_subdirectory(FileCheck)
