@@ -207,8 +207,7 @@ int main(int argc, char const **argv) {
   SM->setIncludeDirs(IncludeDirs);
   SM->setVirtualFileSystem(vfs::getRealFileSystem());
 
-  MCContext FPCtx(TheTriple, MAI.get(), MRI.get(), STI.get(), SM.get(),
-                  &Options);
+  MCContext FPCtx(TheTriple, MAI.get(), MRI.get(), STI.get(), SM.get());
   std::unique_ptr<MCObjectFileInfo> FPMOFI =
       std::make_unique<MCObjectFileInfo>();
   FPMOFI->initMCObjectFileInfo(FPCtx, false);
@@ -247,7 +246,7 @@ int main(int argc, char const **argv) {
   // Second pass starts here.
   // This is where the instrumentation actually happens.
 
-  MCContext Ctx(TheTriple, MAI.get(), MRI.get(), STI.get(), SM.get(), &Options);
+  MCContext Ctx(TheTriple, MAI.get(), MRI.get(), STI.get(), SM.get());
   std::unique_ptr<MCObjectFileInfo> MOFI = std::make_unique<MCObjectFileInfo>();
   MOFI->initMCObjectFileInfo(Ctx, false);
   Ctx.setObjectFileInfo(MOFI.get());
@@ -264,7 +263,7 @@ int main(int argc, char const **argv) {
       Ctx, std::move(MAB), std::move(OW),
       std::unique_ptr<MCCodeEmitter>(Target->createMCCodeEmitter(*MCII, Ctx)),
       *STI, ABIInstrumentation);
-  Streamer.initSections(false, *STI);
+  Streamer.initSections(*STI);
 
   std::unique_ptr<MCAsmParser> Parser(
       createMCAsmParser(*SM.get(), Ctx, Streamer, *MAI));

@@ -1,4 +1,7 @@
 set(LLVM_LINK_COMPONENTS
+  AllTargetsAsmParsers
+  AllTargetsInfos
+  AllTargetsDescs
   MC
   MCParser
   Support
@@ -14,14 +17,9 @@ add_llvm_tool(abisan
 )
 
 target_compile_options(abisan PRIVATE
-    -fsanitize=address,undefined
     -fno-omit-frame-pointer
     -g
     -O0
-)
-
-target_link_options(abisan PRIVATE
-    -fsanitize=address,undefined
 )
 
 target_include_directories(abisan PRIVATE
