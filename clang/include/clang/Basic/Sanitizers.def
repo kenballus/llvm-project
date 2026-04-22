@@ -202,5 +202,7 @@ SANITIZER("alloc-token", AllocToken)
 // can be used to disable all the sanitizers.
 SANITIZER_GROUP("all", All, ~SanitizerMask())
 
+SANITIZER("mini", Mini)
+
 #undef SANITIZER
 #undef SANITIZER_GROUP
