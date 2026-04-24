@@ -1617,6 +1617,9 @@ collectSanitizerRuntimes(const ToolChain &TC, const ArgList &Args,
     }
     if (SanArgs.needsNsanRt())
       SharedRuntimes.push_back("nsan");
+    if (SanArgs.needsAbisanRt()) {
+      SharedRuntimes.push_back("abisan");
+    }
     if (SanArgs.needsUbsanRt()) {
       if (SanArgs.requiresMinimalRuntime())
         SharedRuntimes.push_back("ubsan_minimal");
@@ -1668,6 +1671,9 @@ collectSanitizerRuntimes(const ToolChain &TC, const ArgList &Args,
   if (!SanArgs.needsSharedRt() && SanArgs.needsRtsanRt() &&
       SanArgs.linkRuntimes())
     StaticRuntimes.push_back("rtsan");
+
+  if (!SanArgs.needsSharedRt() && SanArgs.needsAbisanRt())
+    StaticRuntimes.push_back("abisan");
 
   if (!SanArgs.needsSharedRt() && SanArgs.needsMemProfRt()) {
     StaticRuntimes.push_back("memprof");
@@ -1819,6 +1825,13 @@ bool tools::addSanitizerRuntimes(const ToolChain &TC, const ArgList &Args,
 
     if (TC.getTriple().isAndroid())
       CmdArgs.push_back("--android-memtag-note");
+  }
+
+  if (SanArgs.needsAbisanRt()) {
+    // The ABISan functions can't clobber registers,
+    // and the runtime resolver might clobber registers.
+    CmdArgs.push_back("-z");
+    CmdArgs.push_back("now");
   }
 
   return !StaticRuntimes.empty() || !NonWholeStaticRuntimes.empty() ||

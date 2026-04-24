@@ -80,10 +80,13 @@ class ABISanFirstPassStreamer : public MCELFStreamer {
   // This class exists to make a first pass over the .s file to collect
   // all the names of the functions we want to instrument.
 private:
+  // Local symbols that can't ever become global
   DenseSet<StringRef> ProtectedSymbolNames;
 
 public:
+  // Global symbols
   DenseSet<StringRef> ABISymbolNames;
+  // Local symbols (superset of ProtectedSymbolNames)
   DenseSet<StringRef> NonABISymbolNames;
 
   ABISanFirstPassStreamer(MCContext &Context, std::unique_ptr<MCAsmBackend> MAB,
@@ -94,14 +97,36 @@ public:
 
   bool emitSymbolAttribute(MCSymbol *Symbol, MCSymbolAttr Attribute) override {
     auto const SymbolName = Symbol->getName();
+    // GNU as has 3 symbol binding options:
+    // - global
+    //   Externally visible.
+    // - weak
+    //   Externally visible and can be overridden.
+    // - local
+    //   Not externally visible.
+
+    // It also has 3 symbol visibility options:
+    // - protected
+    //   Makes references to this symbol in this file always resolve to
+    //   this definition of the symbol, regardless of whether other
+    //   definitions exist and would otherwise take priority.
+    // - internal
+    //   Makes this symbol not externally visible.
+    // - hidden
+    //   Makes this symbol not externally visible.
+
     if (Attribute == MCSA_Global &&
         !ProtectedSymbolNames.contains(SymbolName)) {
+      // If a symbol is global and not protected,
+      // it needs to conform to the ABI.
       if (NonABISymbolNames.contains(SymbolName)) {
         NonABISymbolNames.erase(SymbolName);
       }
       ABISymbolNames.insert(Symbol->getName());
     } else if (Attribute == MCSA_Protected || Attribute == MCSA_Hidden ||
-               Attribute == MCSA_Internal) {
+               Attribute == MCSA_Internal || Attribute == MCSA_Local) {
+      // If a symbol is protected, hidden, internal, or local,
+      // it doesn't need to conform to the ABI.
       if (ABISymbolNames.contains(SymbolName)) {
         ABISymbolNames.erase(SymbolName);
       }
@@ -114,9 +139,6 @@ public:
 
   void emitLabel(MCSymbol *Symbol, SMLoc Loc = SMLoc()) override {
     MCELFStreamer::emitLabel(Symbol, Loc);
-    if (Symbol->getOffset() != 0) {
-      return;
-    }
     auto const SymbolName = Symbol->getName();
     if (!ABISymbolNames.contains(SymbolName)) {
       NonABISymbolNames.insert(SymbolName);

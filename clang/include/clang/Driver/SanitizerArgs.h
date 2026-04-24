@@ -92,6 +92,7 @@ public:
 
   bool needsMemProfRt() const { return NeedsMemProfRt; }
   bool needsAsanRt() const { return Sanitizers.has(SanitizerKind::Address); }
+  bool needsAbisanRt() const { return Sanitizers.has(SanitizerKind::Abi); }
   bool needsHwasanRt() const {
     return Sanitizers.has(SanitizerKind::HWAddress);
   }

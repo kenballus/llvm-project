@@ -6,7 +6,7 @@
 # RUN: clang -Wl,-z,now %t.o -o %t -L %llvm_lib_dir -fsanitize=abi
 # RUN: export LD_LIBRARY_PATH="%llvm_lib_dir:$LD_LIBRARY_PATH" && not %t 2>&1 | FileCheck %s
 
-# CHECK: ABISanitizer: R12 clobbered with 0x1337
+# CHECK: ABISanitizer: You accessed a tainted R11.
 
 .intel_syntax noprefix
 
@@ -14,7 +14,9 @@
 
 .globl main
 main:
-# CHECK-ABISAN: [[#@LINE+1]]:5: warning: this instruction might clobber R12.
-    mov r12d, 0x1337
-    xor eax, eax
+    push rbp
+    mov rbp, rsp
+# CHECK-ABISAN: [[#@LINE+1]]:5: warning: this instruction might access a clobbered/uninitialized R11.
+    add rsi, r11
+    leave
     ret

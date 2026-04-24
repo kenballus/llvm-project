@@ -174,14 +174,7 @@ protected:
   }
 
   void updateRegisterStatuses(MCSymbol const &Symbol, SMLoc Loc) {
-    if (Symbol.getName() == "main" && Symbol.getOffset() == 0) {
-      // Mark everything as dirty
-      setAllRegisterStatuses(ABISanRegisterStatus::Dirty, Loc);
-      // Mark the arguments as clean
-      for (auto const Reg : ABIInfo.getMainArgumentSuperregisters()) {
-        setSubregisterStatus(Reg, ABISanRegisterStatus::Clean, Loc);
-      }
-    } else if (ABIInfo.isABISymbol(Symbol)) {
+    if (ABIInfo.isABISymbol(Symbol)) {
       setAllRegisterStatuses(ABISanRegisterStatus::Unknown, Loc);
       for (auto const Reg : ABIInfo.getNonArgumentSubregisters()) {
         setSuperregisterStatus(Reg, ABISanRegisterStatus::Dirty, Loc);

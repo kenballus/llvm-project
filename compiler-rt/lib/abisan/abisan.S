@@ -14,7 +14,7 @@
 
 #define DF_MASK 0b10000000000
 
-.globl __abisan_function_entry
+.global __abisan_function_entry
 __abisan_function_entry:
     // Check for stack misalignment.
     // This is confusing, because calling __abisan_function_entry is always
@@ -24,19 +24,47 @@ __abisan_function_entry:
     mov r11, rsp
     and r11, 0xf
     test r11, r11
-    je 1f
+    je 2f
 
-    // The stack is misaligned, so align it and fail
+    mov r11, rsp
+    and r11, 0x7
+    test r11, r11
+    je 1f
+    // stack misaligned, and not multiple of 8 (weird)
     and rsp, -16
+    xor dil, dil // unwind=false
     call __abisan_fail_stack_misalignment
-1:
+
+1: // stack misaligned, but still multiple of 8
+    // the following is evil frame pointer surgery so that stack unwinding works.
+    mov r11, [rsp + 8] // move caller's retaddr 8 bytes up
+    mov [rsp + 16], r11
+    pop r11 // grab our retaddr
+    add rsp, 8 // clear gap where caller's retaddr was
+    push rbp // set up fake frame pointer for caller
+    mov rbp, rsp
+    push r11 // put back our retaddr
+    push rbp // set up our frame pointer
+    mov rbp, rsp
+    mov dil, 1 // unwind=true
+    call __abisan_fail_stack_misalignment
+
+2: // stack aligned!
     push rbp
     // From this point forward, we know the stack is aligned
     mov rbp, rsp
 
-    // The shadow stack pointer is initialized by this point because of the constructor function defined at the bottom of this file.
+    // Couldn't figure out how to do thread_local initialization to a non-constant value,
+    // so I just do it here.
     READ_TLS_QWORD(r11, __abisan_shadow_stack_pointer)
-
+    test r11, r11
+    jne 1f
+    GET_TLS_ADDR(r11, __abisan_shadow_stack_pointer)
+    GET_TLS_ADDR(rbp, __abisan_shadow_stack)
+    mov [r11], rbp
+    mov rbp, [rsp] // put rbp back
+    mov r11, [r11]
+1:
     // Save the easy stuff into the frame
     mov [r11 + FRAME_RBX], rbx
     mov [r11 + FRAME_R12], r12
@@ -49,7 +77,7 @@ __abisan_function_entry:
     and dword ptr [r11 + FRAME_MXCSR], 0xffe0
 
     // Save rsp into the frame.
-    // Note that the value we want to save in the frame should be the value that was in rsp at 
+    // Note that the value we want to save in the frame should be the value that was in rsp at
     // the entry point to the instrumented function. Because this function (__abisan_function_entry)
     // was called, and then we pushed rbp and set rbp = rsp, and this function has no locals,
     // the value we want to save is rbp + 0x10
@@ -72,10 +100,6 @@ __abisan_function_entry:
     // Reset rbx
     mov rbx, [r11 + FRAME_RBX]
     // Starting here, rbx is no longer used as scratch
-
-    // Replace the instrumented function's return address with __abisan_function_exit
-    lea r11, [rip + __abisan_function_exit] // r11 = __abisan_function_exit
-    mov [rbp + 0x10], r11
 
     // Update __abisan_shadow_stack_pointer
     GET_TLS_ADDR(r11, __abisan_shadow_stack_pointer)
@@ -109,89 +133,122 @@ __abisan_function_entry:
     not r11
     and [rsp], r11
     popfq
-    call __abisan_fail_df_set
+    leave // point rsp to our retaddr
+    pop r11 // grab it
+    push rbp // set up fake frame for caller
+    mov rbp, rsp
+    push r11 // put our retaddr back
+    push rbp // make a frame for us
+    mov rbp, rsp
+    call __abisan_fail_df_set_entry
 1:
+    // Replace the instrumented function's return address with __abisan_function_exit
+    lea r11, [rip + __abisan_function_exit] // r11 = __abisan_function_exit
+    mov [rbp + 0x10], r11
+
     leave
     ret
 
 __abisan_function_exit:
-    sub rsp, 0x10
+    sub rsp, 8
 
-    GET_TLS_ADDR(rdi, __abisan_shadow_stack_pointer)
-    sub qword ptr [rdi], SHADOW_STACK_FRAME_SIZE
+    GET_TLS_ADDR(rsi, __abisan_shadow_stack_pointer)
+    sub qword ptr [rsi], SHADOW_STACK_FRAME_SIZE
+    mov rsi, [rsi]
 
-    mov rdi, [rdi]
-
-    lea rsi, [rsp + 8]
-    cmp rsi, [rdi + FRAME_RSP]
+    cmp rsp, [rsi + FRAME_RSP]
     je 1f
-
+    mov rsi, [rsi + FRAME_RSP]
+    mov rdx, rsp
     and rsp, -16
     call __abisan_fail_clobber_RSP
 1:
-    // From this point forward, we know the stack is aligned
+    // Put the original return address back in place
+    mov rdi, [rsi + FRAME_RETADDR]
+    mov [rsp], rdi
+
+    // And save it in last_instrumented_exit_retaddr
+    GET_TLS_ADDR(rsi, __abisan_last_instrumented_exit_retaddr)
+    mov [rsi], rdi
+
+    READ_TLS_QWORD(rsi, __abisan_shadow_stack_pointer)
+
+    cmp rbp, [rsi + FRAME_RBP]
+    je 1f
+    mov rsi, [rsi + FRAME_RBP]
+    mov rdx, rbp
+    and rsp, -16
+    call __abisan_fail_clobber_RBP
+1:
+    // make our frame
+    push rbp
+    mov rbp, rsp
+    sub rsp, 0x10
 
     fnstcw [rsp]
-    mov si, [rsp]
-    cmp si, [rdi + FRAME_X87CW]
+    movzx rdx, word ptr [rsp]
+    cmp dx, [rsi + FRAME_X87CW]
     je 1f
+    movzx rsi, word ptr [rsi + FRAME_RBP]
     call __abisan_fail_clobber_X87CW
 1:
 
     stmxcsr [rsp]
-    mov esi, [rsp]
-    and esi, 0xffe0
-    cmp esi, [rdi + FRAME_MXCSR]
+    movzx rdx, word ptr [rsp]
+    and dx, 0xffe0
+    cmp dx, [rsi + FRAME_MXCSR]
     je 1f
+    movzx rsi, word ptr [rsi + FRAME_MXCSR]
     call __abisan_fail_clobber_MXCSR
 1:
 
-    mov si, fs
-    cmp si, [rdi + FRAME_FS]
+    mov dx, fs
+    cmp dx, [rsi + FRAME_FS]
     je 1f
+    and rdx, 0xffff
+    movzx rsi, word ptr [rsi + FRAME_FS]
     call __abisan_fail_clobber_FS
 1:
 
-    mov rsi, rbx
-    cmp rsi, [rdi + FRAME_RBX]
+    cmp rbx, [rsi + FRAME_RBX]
     je 1f
+    mov rsi, [rsi + FRAME_RBX]
+    mov rdx, rbx
     call __abisan_fail_clobber_RBX
 1:
 
-    mov rsi, rbp
-    cmp rsi, [rdi + FRAME_RBP]
+    cmp r12, [rsi + FRAME_R12]
     je 1f
-    call __abisan_fail_clobber_RBP
-1:
-
-    mov rsi, r12
-    cmp rsi, [rdi + FRAME_R12]
-    je 1f
+    mov rsi, [rsi + FRAME_R12]
+    mov rdx, r12
     call __abisan_fail_clobber_R12
 1:
 
-    mov rsi, r13
-    cmp rsi, [rdi + FRAME_R13]
+    cmp r13, [rsi + FRAME_R13]
     je 1f
+    mov rsi, [rsi + FRAME_R13]
+    mov rdx, r13
     call __abisan_fail_clobber_R13
 1:
 
-    mov rsi, r14
-    cmp rsi, [rdi + FRAME_R14]
+    cmp r14, [rsi + FRAME_R14]
     je 1f
+    mov rsi, [rsi + FRAME_R14]
+    mov rdx, r14
     call __abisan_fail_clobber_R14
 1:
 
-    mov rsi, r15
-    cmp rsi, [rdi + FRAME_R15]
+    cmp r15, [rsi + FRAME_R15]
     je 1f
+    mov rsi, [rsi + FRAME_R15]
+    mov rdx, r15
     call __abisan_fail_clobber_R15
 1:
 
     pushfq
-    pop rsi
-    and rsi, DF_MASK
-    test rsi, rsi
+    pop rdi
+    and rdi, DF_MASK
+    test rdi, rdi
     je 1f
 
     // If we're here, df is set, so clear it and fail
@@ -200,16 +257,8 @@ __abisan_function_exit:
     not r11
     and [rsp], r11
     popfq
-    call __abisan_fail_df_set
+    call __abisan_fail_df_set_exit
 1:
-    // Put the original return address back in place
-    mov rsi, [rdi + FRAME_RETADDR]
-    mov [rsp + 8], rsi
-
-    GET_TLS_ADDR(rdi, __abisan_last_instrumented_exit_retaddr)
-    mov [rdi], rsi
-
-    add rsp, 0x8
 
     // Set every flag, except
     // Res_1 (because defined always to be 1)
@@ -237,6 +286,7 @@ __abisan_function_exit:
 
     // TODO: clobber the red zone
 
+    leave
     ret
 
 #define ABISAN_TAINT_COPY_DEF(dst, src, mask) \
@@ -353,11 +403,11 @@ __abisan_taint_clear_##reg: ; \
 __abisan_taint_check_##reg: ; \
     push rax ; \
     GET_TLS_ADDR(rax, __abisan_taint_state) ; \
-    mov al, byte ptr [rax + TAINT_STATE_##reg] ; \
+    mov al, [rax + TAINT_STATE_##reg] ; \
     and al, mask ; \
     test al, al ; \
     je 1f ; \
-    push rbp ; \
+    mov [rsp], rbp ; \
     mov rbp, rsp ; \
     and rsp, -16 ; \
     lea rdi, [rip + .Lstr_##reg] ; \
@@ -453,8 +503,6 @@ ABISAN_TAINT64_DEF(RFLAGS)
 __abisan_fail_clobber_##reg: ; \
     push rbp ; \
     mov rbp, rsp ; \
-    and rsp, -16 ; \
-    mov rdx, rdi ; \
     lea rdi, [rip + 1f] ; \
     call __abisan_fail_clobber ; \
 1: ; \
@@ -470,18 +518,3 @@ ABISAN_FAIL_CLOBBER_DEF(R15)
 ABISAN_FAIL_CLOBBER_DEF(X87CW)
 ABISAN_FAIL_CLOBBER_DEF(FS)
 ABISAN_FAIL_CLOBBER_DEF(MXCSR)
-
-__abisan_initialize_shadow_stack_pointer:
-    push rbp
-    mov rbp, rsp
-
-    GET_TLS_ADDR(rdi, __abisan_shadow_stack_pointer)
-    GET_TLS_ADDR(rsi, __abisan_shadow_stack)
-    mov [rdi], rsi
-
-    leave
-    ret
-
-.section .init_array.101
-.align 8
-.quad __abisan_initialize_shadow_stack_pointer

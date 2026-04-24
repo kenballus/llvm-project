@@ -3,7 +3,6 @@ include(LLVM-Build)
 # `Demangle', `Support' and `TableGen' libraries are added on the top-level
 # CMakeLists.txt
 
-add_subdirectory(ABISanRuntime)
 add_subdirectory(IR)
 add_subdirectory(ABI)
 add_subdirectory(FuzzMutate)

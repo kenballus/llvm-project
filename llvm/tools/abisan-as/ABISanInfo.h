@@ -93,8 +93,6 @@ public:
 
   virtual DenseSet<MCRegister> const &getNonvolatileSuperregisters() const = 0;
 
-  virtual DenseSet<MCRegister> const &getMainArgumentSuperregisters() const = 0;
-
   virtual DenseSet<MCRegister> const &getNonArgumentSuperregisters() const = 0;
 
   virtual DenseSet<MCRegister> const &getNonArgumentSubregisters() const = 0;
@@ -333,7 +331,7 @@ public:
 
   bool isABISymbol(MCSymbol const &Symbol) const {
     return ABISymbolNames.contains(Symbol.getName()) && Symbol.isInSection() &&
-           Symbol.getSection().isText() && Symbol.getOffset() == 0;
+           Symbol.getSection().isText();
   }
 };
 

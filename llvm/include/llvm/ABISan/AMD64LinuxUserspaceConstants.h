@@ -1,10 +1,11 @@
 #pragma once
-// This gets included from C, C++, and assembly, so we can basically only #define
+// This gets included from C, C++, and assembly, so we can basically only
+// #define
 
 #define REDZONE_SIZE 128
 #define STACK_SIZE 0x8000000
 
-#define SHADOW_STACK_FRAME_SIZE 88
+#define SHADOW_STACK_FRAME_SIZE 86
 
 // Offsets of fields within struct abisan_shadow_stack_frame
 #define FRAME_RETADDR 0x00

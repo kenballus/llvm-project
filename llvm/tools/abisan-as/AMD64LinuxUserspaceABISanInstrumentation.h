@@ -407,25 +407,12 @@ public:
 
     SmallVector<std::variant<MCInst, MCSymbol *>> Result;
     if (ABIInfo.isABISymbol(*Symbol)) {
-      Result.push_back(
+        // Taint all of rax except al, which is left in its previous state
+        Result.append({
           MCInstBuilder(X86::CALL64pcrel32)
               .addExpr(MCSymbolRefExpr::create(
-                  Ctx.getOrCreateSymbol("__abisan_function_entry"), Ctx)));
-      if (Symbol->getName() == "main") {
-        // No need to worry about the redzone, because this is a function entry
-        // point
-        for (auto const Reg : ABIInfo.getArgumentSuperregisters()) {
-          if (!ABIInfo.getMainArgumentSuperregisters().contains(Reg)) {
-            Result.append(generateTaintSet(Reg));
-          }
-        }
-        for (auto const Reg : ABIInfo.getMainArgumentSuperregisters()) {
-          Result.append(generateTaintClear(Reg));
-        }
-      } else {
-        // Taint all of rax except al, which is left in its previous state
-        Result.append(
-            {// At this point, it's okay to clobber r11, the flags, and
+                  Ctx.getOrCreateSymbol("__abisan_function_entry"), Ctx)),
+            // At this point, it's okay to clobber r11, the flags, and
              // the red zone because none of the instrumented function's
              // code has executed yet.
              // Load our return address into r11
@@ -454,8 +441,8 @@ public:
                          ABIInfo.getShadowStackFrameSize() /* displacement */)
                  .addReg(X86::NoRegister /* segment register */),
              MCInstBuilder(X86::PUSH64r).addReg(X86::RAX),
-             // Load the address of the instruction after the last
-             // instrumented call into rax
+             // Load the TLS offset of __abisan_last_instrumented_call_retaddr
+             // into rax.
              MCInstBuilder(X86::MOV64rm)
                  .addReg(X86::RAX)
                  .addReg(X86::RIP /* base */)
@@ -466,13 +453,6 @@ public:
                          "__abisan_last_instrumented_call_retaddr"),
                      X86::S_GOTTPOFF, Ctx) /* displacement */)
                  .addReg(X86::NoRegister /* segment register */),
-             MCInstBuilder(X86::MOV64rm)
-                 .addReg(X86::RAX)
-                 .addReg(X86::RAX /* base */)
-                 .addImm(1 /* scale */)
-                 .addReg(X86::NoRegister /* index */)
-                 .addImm(0 /* displacement */)
-                 .addReg(X86::FS /* segment register */),
              // Compare the two
              MCInstBuilder(X86::CMP64rm)
                  .addReg(X86::R11)
@@ -480,7 +460,7 @@ public:
                  .addImm(1 /* scale */)
                  .addReg(X86::NoRegister /* index */)
                  .addImm(0 /* displacement */)
-                 .addReg(X86::NoRegister /* segment register */),
+                 .addReg(X86::FS /* segment register */),
              // If it's equal, skip untainting the argument
              // registers
              MCInstBuilder(X86::POP64r).addReg(X86::RAX),
@@ -493,7 +473,6 @@ public:
         }
         Result.push_back(RestoreRedzone);
         Result.push_back(dispenseLocalLabel());
-      }
     }
 
     updateRegisterStatuses(*Symbol, Loc);

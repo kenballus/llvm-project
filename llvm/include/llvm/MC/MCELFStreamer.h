@@ -71,7 +71,7 @@ public:
 
   // This is final. Override MCTargetStreamer::finish instead for
   // target-specific code.
-  void finishImpl() final;
+  void finishImpl() override;
 
   /// ELF object attributes section emission support
   struct AttributeItem {

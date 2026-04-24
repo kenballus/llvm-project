@@ -1,18 +1,8 @@
 #pragma once
-#include <pthread.h> // for pthread_mutex_t
-#include <stddef.h>  // for offsetof
-#include <stdint.h>  // for uint8_t, uint16_t, uint64_t
+#include <stddef.h> // for offsetof
+#include <stdint.h> // for uint8_t, uint16_t, uint64_t
 
 #include "llvm/ABISan/AMD64LinuxUserspaceConstants.h"
-
-extern pthread_mutex_t __abisan_mutex;
-
-// The address of the instruction after the last global call in instrumented
-// code
-extern thread_local void *__abisan_last_instrumented_call_retaddr;
-
-// The return address of the last __abisan_function_exit to run in this thread
-extern thread_local void *__abisan_last_instrumented_exit_retaddr;
 
 struct shadow_stack_frame {
   void *retaddr;
@@ -27,7 +17,7 @@ struct shadow_stack_frame {
   uint64_t rflags;
   uint16_t x87cw;
   uint16_t fs;
-  uint32_t mxcsr;
+  uint16_t mxcsr;
 } __attribute__((packed));
 
 static_assert(SHADOW_STACK_FRAME_SIZE == sizeof(struct shadow_stack_frame));
@@ -47,9 +37,6 @@ static_assert(FRAME_FS == offsetof(struct shadow_stack_frame, fs));
 static_assert(FRAME_MXCSR == offsetof(struct shadow_stack_frame, mxcsr));
 
 #define SHADOW_STACK_SIZE (1000)
-extern thread_local struct shadow_stack_frame
-    __abisan_shadow_stack[SHADOW_STACK_SIZE];
-extern thread_local struct shadow_stack_frame *__abisan_shadow_stack_pointer;
 
 struct taint_state {
   uint8_t rax;
@@ -88,13 +75,29 @@ static_assert(TAINT_STATE_R15 == offsetof(struct taint_state, r15));
 static_assert(TAINT_STATE_RBP == offsetof(struct taint_state, rbp));
 static_assert(TAINT_STATE_RFLAGS == offsetof(struct taint_state, rflags));
 
-extern thread_local struct taint_state __abisan_taint_state;
 
-void __abisan_fail_df_set(void);
+extern "C" {
+// The address of the instruction after the last global call in instrumented
+// code
+__thread void *__abisan_last_instrumented_call_retaddr;
 
-void __abisan_fail_stack_misalignment(void);
+// The return address of the last __abisan_function_exit to run in this thread
+__thread void *__abisan_last_instrumented_exit_retaddr;
 
-void __abisan_fail_clobber(char const *, uint64_t,
-                           struct shadow_stack_frame const *);
+__thread struct taint_state __abisan_taint_state;
+
+__thread struct shadow_stack_frame
+    __abisan_shadow_stack[SHADOW_STACK_SIZE];
+
+__thread struct shadow_stack_frame *__abisan_shadow_stack_pointer;
+
+void __abisan_fail_df_set_entry(void);
+
+void __abisan_fail_df_set_exit(void);
+
+void __abisan_fail_stack_misalignment(bool);
+
+void __abisan_fail_clobber(char const *, uint64_t, uint64_t);
 
 void __abisan_taint_fail(char const *);
+}

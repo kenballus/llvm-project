@@ -27,12 +27,6 @@ public:
 
   unsigned getRedzoneSize() const override { return REDZONE_SIZE; }
 
-  DenseSet<MCRegister> const &getMainArgumentSuperregisters() const override {
-    static DenseSet<MCRegister> const MainArgumentSuperregisters{
-        X86::EDI, X86::RSI, X86::RDX};
-    return MainArgumentSuperregisters;
-  }
-
   DenseSet<MCRegister> const &getNonArgumentSuperregisters() const override {
     // Superregisters taht are never used for any form of argument passing.
     // Note that RAX is not present because AL is used for argument passing.
