@@ -32,6 +32,7 @@
 #include "llvm/Support/CommandLine.h"           // for cl::*
 #include "llvm/Support/InitLLVM.h"              // for InitLLVM
 #include "llvm/Support/MemoryBuffer.h"          // for MemoryBuffer::getFile
+#include "llvm/Support/Process.h"               // for sys::Process::GetEnv
 #include "llvm/Support/SMLoc.h"                 // for SMLoc
 #include "llvm/Support/SourceMgr.h"             // for SourceMgr
 #include "llvm/Support/TargetSelect.h" // for InitializeAllTargetInfos, InitializeAllTargetMCs, InitializeAllAsmParsers
@@ -39,6 +40,7 @@
 #include "llvm/Support/raw_ostream.h"       // for raw_fd_ostream
 #include "llvm/TargetParser/Host.h"         // for getDefaultTargetTriple
 #include <cassert>                          // for assert
+#include <optional>                         // for std::optional
 #include <string>                           // for std::string
 #include <variant> // for std::variant, std::holds_alternative, std::get
 
@@ -81,19 +83,31 @@ class ABISanFirstPassStreamer : public MCELFStreamer {
   // all the names of the functions we want to instrument.
 private:
   // Local symbols that can't ever become global
-  DenseSet<StringRef> ProtectedSymbolNames;
+  DenseSet<StringRef> PermanentlyLocalSymbolNames;
 
+  SmallVector<std::string> IgnoredSymbolNames;
 public:
   // Global symbols
   DenseSet<StringRef> ABISymbolNames;
-  // Local symbols (superset of ProtectedSymbolNames)
+  // Local symbols (superset of PermanentlyLocalSymbolNames)
   DenseSet<StringRef> NonABISymbolNames;
 
   ABISanFirstPassStreamer(MCContext &Context, std::unique_ptr<MCAsmBackend> MAB,
                           std::unique_ptr<MCObjectWriter> OW,
                           std::unique_ptr<MCCodeEmitter> Emitter)
       : MCELFStreamer(Context, std::move(MAB), std::move(OW),
-                      std::move(Emitter)) {}
+                      std::move(Emitter)) {
+    std::optional<std::string> IgnoredSymbolsStrOption =
+        sys::Process::GetEnv("ABISAN_IGNORED_SYMBOLS");
+    if (IgnoredSymbolsStrOption) {
+      SmallVector<StringRef> IgnoredSymbolNames;
+      StringRef(*IgnoredSymbolsStrOption).split(IgnoredSymbolNames, ':');
+      PermanentlyLocalSymbolNames.insert(IgnoredSymbolNames.begin(),
+                                         IgnoredSymbolNames.end());
+      NonABISymbolNames.insert(IgnoredSymbolNames.begin(),
+                               IgnoredSymbolNames.end());
+    }
+  }
 
   bool emitSymbolAttribute(MCSymbol *Symbol, MCSymbolAttr Attribute) override {
     auto const SymbolName = Symbol->getName();
@@ -116,13 +130,13 @@ public:
     //   Makes this symbol not externally visible.
 
     if (Attribute == MCSA_Global &&
-        !ProtectedSymbolNames.contains(SymbolName)) {
+        !PermanentlyLocalSymbolNames.contains(SymbolName)) {
       // If a symbol is global and not protected,
       // it needs to conform to the ABI.
       if (NonABISymbolNames.contains(SymbolName)) {
         NonABISymbolNames.erase(SymbolName);
       }
-      ABISymbolNames.insert(Symbol->getName());
+      ABISymbolNames.insert(SymbolName);
     } else if (Attribute == MCSA_Protected || Attribute == MCSA_Hidden ||
                Attribute == MCSA_Internal || Attribute == MCSA_Local) {
       // If a symbol is protected, hidden, internal, or local,
@@ -130,8 +144,8 @@ public:
       if (ABISymbolNames.contains(SymbolName)) {
         ABISymbolNames.erase(SymbolName);
       }
-      if (!ProtectedSymbolNames.contains(SymbolName)) {
-        ProtectedSymbolNames.insert(SymbolName);
+      if (!PermanentlyLocalSymbolNames.contains(SymbolName)) {
+        PermanentlyLocalSymbolNames.insert(SymbolName);
       }
     }
     return MCELFStreamer::emitSymbolAttribute(Symbol, Attribute);
