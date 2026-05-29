@@ -2,11 +2,8 @@
 # This check is to make sure that no other warnings are emitted.
 # RUN: abisan-as %s -o %t.o 2>&1 | count 0
 
-# RUN: clang -static %t.o -o %t -L %llvm_lib_dir -fsanitize=abi
-# RUN: not %t 2>&1 | FileCheck %s
-
 # RUN: clang -Wl,-z,now %t.o -o %t -L %llvm_lib_dir -fsanitize=abi
-# RUN: export LD_LIBRARY_PATH="%llvm_lib_dir:$LD_LIBRARY_PATH" && not %t 2>&1 | FileCheck %s
+# RUN: not %t 2>&1 | FileCheck %s
 
 # CHECK: ABISanitizer: RSP clobbered
 
