@@ -93,11 +93,6 @@ public:
   }
 
   static LocIdx MakeIllegalLoc() { return LocIdx(); }
-  static LocIdx MakeTombstoneLoc() {
-    LocIdx L = LocIdx();
-    --L.Location;
-    return L;
-  }
 
   bool isIllegal() const { return Location == UINT_MAX; }
 
@@ -158,9 +153,10 @@ class ValueIDNum {
   static_assert(sizeof(u) == 8, "Badly packed ValueIDNum?");
 
 public:
-  // Default-initialize to EmptyValue. This is necessary to make IndexedMaps
+  // Default-initialize to an empty value. This is necessary to make IndexedMaps
   // of values to work.
-  ValueIDNum() { u.Value = EmptyValue.asU64(); }
+  constexpr ValueIDNum()
+      : u{{(1u << 20) - 1, (1u << 20) - 1, (1u << NUM_LOC_BITS) - 1}} {}
 
   ValueIDNum(uint64_t Block, uint64_t Inst, uint64_t Loc) {
     u.s = {Block, Inst, Loc};
@@ -204,9 +200,6 @@ public:
                                             .concat(Twine("}")))))
         .str();
   }
-
-  LLVM_ABI_FOR_TEST static ValueIDNum EmptyValue;
-  LLVM_ABI_FOR_TEST static ValueIDNum TombstoneValue;
 };
 
 } // End namespace LiveDebugValues
@@ -215,20 +208,12 @@ namespace llvm {
 using namespace LiveDebugValues;
 
 template <> struct DenseMapInfo<LocIdx> {
-  static inline LocIdx getEmptyKey() { return LocIdx::MakeIllegalLoc(); }
-  static inline LocIdx getTombstoneKey() { return LocIdx::MakeTombstoneLoc(); }
-
   static unsigned getHashValue(const LocIdx &Loc) { return Loc.asU64(); }
 
   static bool isEqual(const LocIdx &A, const LocIdx &B) { return A == B; }
 };
 
 template <> struct DenseMapInfo<ValueIDNum> {
-  static inline ValueIDNum getEmptyKey() { return ValueIDNum::EmptyValue; }
-  static inline ValueIDNum getTombstoneKey() {
-    return ValueIDNum::TombstoneValue;
-  }
-
   static unsigned getHashValue(const ValueIDNum &Val) {
     return hash_value(Val.asU64());
   }
@@ -252,8 +237,7 @@ struct FuncValueTable {
   FuncValueTable(int NumBBs, int NumLocs) {
     Storage.reserve(NumBBs);
     for (int i = 0; i != NumBBs; ++i)
-      Storage.push_back(
-          std::make_unique<ValueTable>(NumLocs, ValueIDNum::EmptyValue));
+      Storage.push_back(std::make_unique<ValueTable>(NumLocs, ValueIDNum()));
   }
 
   /// Returns the ValueTable associated with MBB.
@@ -364,11 +348,11 @@ struct DbgOp {
   };
   bool IsConst;
 
-  DbgOp() : ID(ValueIDNum::EmptyValue), IsConst(false) {}
+  DbgOp() : ID(), IsConst(false) {}
   DbgOp(ValueIDNum ID) : ID(ID), IsConst(false) {}
   DbgOp(MachineOperand MO) : MO(MO), IsConst(true) {}
 
-  bool isUndef() const { return !IsConst && ID == ValueIDNum::EmptyValue; }
+  bool isUndef() const { return !IsConst && ID == ValueIDNum(); }
 
 #ifndef NDEBUG
   void dump(const MLocTracker *MTrack) const;
@@ -423,10 +407,10 @@ struct DbgOpID {
   DbgOpID() : RawID(UndefID.RawID) {
     static_assert(sizeof(DbgOpID) == 4, "DbgOpID should fit within 4 bytes.");
   }
-  DbgOpID(uint32_t RawID) : RawID(RawID) {}
+  constexpr DbgOpID(uint32_t RawID) : RawID(RawID) {}
   DbgOpID(bool IsConst, uint32_t Index) : ID({IsConst, Index}) {}
 
-  LLVM_ABI_FOR_TEST static DbgOpID UndefID;
+  LLVM_ABI_FOR_TEST static const DbgOpID UndefID;
 
   bool operator==(const DbgOpID &Other) const { return RawID == Other.RawID; }
   bool operator!=(const DbgOpID &Other) const { return !(*this == Other); }
@@ -597,8 +581,8 @@ public:
   ArrayRef<DbgOpID> getDbgOpIDs() const { return {DbgOps, OpCount}; }
 
   // Returns either DbgOps[Index] if this DbgValue has Debug Operands, or
-  // the ID for ValueIDNum::EmptyValue otherwise (i.e. if this is an Undef,
-  // NoVal, or an unjoined VPHI).
+  // the ID for ValueIDNum() otherwise (i.e. if this is an Undef, NoVal, or an
+  // unjoined VPHI).
   DbgOpID getDbgOpID(unsigned Index) const {
     if (!OpCount)
       return DbgOpID::UndefID;
@@ -951,7 +935,7 @@ public:
   void wipeRegister(Register R) {
     unsigned ID = getLocID(R);
     LocIdx Idx = LocIDToLocIdx[ID];
-    LocIdxToIDNum[Idx] = ValueIDNum::EmptyValue;
+    LocIdxToIDNum[Idx] = ValueIDNum();
   }
 
   /// Determine the LocIdx of an existing register.

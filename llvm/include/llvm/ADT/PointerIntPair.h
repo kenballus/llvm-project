@@ -34,7 +34,8 @@ template <typename Ptr> struct PunnedPointer {
   static_assert(std::is_trivially_copy_constructible<Ptr>::value, "");
   static_assert(std::is_trivially_move_constructible<Ptr>::value, "");
 
-  explicit constexpr PunnedPointer(intptr_t i = 0) { *this = i; }
+  explicit constexpr PunnedPointer() : Data{} {}
+  explicit PunnedPointer(intptr_t i) { *this = i; }
 
   constexpr intptr_t asInt() const {
     intptr_t R = 0;
@@ -44,7 +45,7 @@ template <typename Ptr> struct PunnedPointer {
 
   constexpr operator intptr_t() const { return asInt(); }
 
-  constexpr PunnedPointer &operator=(intptr_t V) {
+  PunnedPointer &operator=(intptr_t V) {
     std::memcpy(Data, &V, sizeof(Data));
     return *this;
   }
@@ -216,18 +217,6 @@ struct PointerIntPairInfo {
 template <typename PointerTy, unsigned IntBits, typename IntType>
 struct DenseMapInfo<PointerIntPair<PointerTy, IntBits, IntType>, void> {
   using Ty = PointerIntPair<PointerTy, IntBits, IntType>;
-
-  static Ty getEmptyKey() {
-    uintptr_t Val = static_cast<uintptr_t>(-1);
-    Val <<= PointerLikeTypeTraits<Ty>::NumLowBitsAvailable;
-    return Ty::getFromOpaqueValue(reinterpret_cast<void *>(Val));
-  }
-
-  static Ty getTombstoneKey() {
-    uintptr_t Val = static_cast<uintptr_t>(-2);
-    Val <<= PointerLikeTypeTraits<PointerTy>::NumLowBitsAvailable;
-    return Ty::getFromOpaqueValue(reinterpret_cast<void *>(Val));
-  }
 
   static unsigned getHashValue(Ty V) {
     uintptr_t IV = reinterpret_cast<uintptr_t>(V.getOpaqueValue());

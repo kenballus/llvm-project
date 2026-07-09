@@ -48,7 +48,7 @@ static cl::opt<std::string>
                    cl::desc("Record GlobalISel rule coverage files of this "
                             "prefix if instrumentation was generated"));
 #else
-static const std::string CoveragePrefix;
+static constexpr StringRef CoveragePrefix;
 #endif
 
 char InstructionSelect::ID = 0;
@@ -242,13 +242,15 @@ bool InstructionSelect::selectMachineFunction(MachineFunction &MF) {
         continue;
       Register SrcReg = MI.getOperand(1).getReg();
       Register DstReg = MI.getOperand(0).getReg();
-      if (SrcReg.isVirtual() && DstReg.isVirtual()) {
-        auto SrcRC = MRI.getRegClass(SrcReg);
-        auto DstRC = MRI.getRegClass(DstReg);
-        if (SrcRC == DstRC) {
-          MRI.replaceRegWith(DstReg, SrcReg);
-          MI.eraseFromParent();
-        }
+      unsigned SrcSubIdx = MI.getOperand(1).getSubReg();
+      if (!SrcReg.isVirtual() || !DstReg.isVirtual() || SrcSubIdx)
+        continue;
+
+      const TargetRegisterClass *SrcRC = MRI.getRegClass(SrcReg);
+      const TargetRegisterClass *DstRC = MRI.getRegClass(DstReg);
+      if (SrcRC == DstRC) {
+        MRI.replaceRegWith(DstReg, SrcReg);
+        MI.eraseFromParent();
       }
     }
   }

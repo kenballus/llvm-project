@@ -13,12 +13,10 @@
 #ifndef LLVM_ANALYSIS_DOTGRAPHTRAITSPASS_H
 #define LLVM_ANALYSIS_DOTGRAPHTRAITSPASS_H
 
+#include "llvm/ADT/StringSet.h"
 #include "llvm/Analysis/CFGPrinter.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/GraphWriter.h"
-#include <unordered_set>
-
-static std::unordered_set<std::string> nameObj;
 
 namespace llvm {
 
@@ -44,8 +42,8 @@ template <typename AnalysisT, bool IsSimple,
           typename AnalysisGraphTraitsT =
               DefaultAnalysisGraphTraits<typename AnalysisT::Result &, GraphT>>
 struct DOTGraphTraitsViewer
-    : PassInfoMixin<DOTGraphTraitsViewer<AnalysisT, IsSimple, GraphT,
-                                         AnalysisGraphTraitsT>> {
+    : RequiredPassInfoMixin<DOTGraphTraitsViewer<AnalysisT, IsSimple, GraphT,
+                                                 AnalysisGraphTraitsT>> {
   DOTGraphTraitsViewer(StringRef GraphName) : Name(GraphName) {}
 
   /// Return true if this function should be processed.
@@ -91,6 +89,7 @@ static inline void shortenFileName(std::string &FN, unsigned char len = 250) {
     FN.resize(len);
   auto strLen = FN.length();
   while (strLen > 0) {
+    static llvm::StringSet<> nameObj;
     if (nameObj.insert(FN).second)
       break;
     FN.resize(--len);
@@ -124,8 +123,8 @@ template <typename AnalysisT, bool IsSimple,
           typename AnalysisGraphTraitsT =
               DefaultAnalysisGraphTraits<typename AnalysisT::Result &, GraphT>>
 struct DOTGraphTraitsPrinter
-    : PassInfoMixin<DOTGraphTraitsPrinter<AnalysisT, IsSimple, GraphT,
-                                          AnalysisGraphTraitsT>> {
+    : RequiredPassInfoMixin<DOTGraphTraitsPrinter<AnalysisT, IsSimple, GraphT,
+                                                  AnalysisGraphTraitsT>> {
   DOTGraphTraitsPrinter(StringRef GraphName) : Name(GraphName) {}
 
   /// Return true if this function should be processed.
