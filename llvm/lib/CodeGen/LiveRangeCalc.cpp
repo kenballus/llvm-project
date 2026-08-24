@@ -34,7 +34,7 @@ using namespace llvm;
 #define DEBUG_TYPE "regalloc"
 
 // Reserve an address that indicates a value that is known to be "undef".
-static constexpr VNInfo UndefVNI(0xbad, SlotIndex());
+static VNInfo UndefVNI(0xbad, SlotIndex());
 
 void LiveRangeCalc::resetLiveOutMap() {
   unsigned NumBlocks = MF->getNumBlockIDs();
@@ -250,7 +250,7 @@ bool LiveRangeCalc::findReachingDefs(LiveRange &LR, MachineBasicBlock &UseMBB,
        auto EP = LR.extendInBlock(Undefs, Start, End);
        VNInfo *VNI = EP.first;
        FoundUndef |= EP.second;
-       setLiveOutValue(Pred, EP.second ? const_cast<VNInfo *>(&UndefVNI) : VNI);
+       setLiveOutValue(Pred, EP.second ? &UndefVNI : VNI);
        if (VNI) {
          if (TheVNI && TheVNI != VNI)
            UniqueVNI = false;
@@ -283,13 +283,14 @@ bool LiveRangeCalc::findReachingDefs(LiveRange &LR, MachineBasicBlock &UseMBB,
     assert(TheVNI != nullptr && TheVNI != &UndefVNI);
     LiveRangeUpdater Updater(&LR);
     for (unsigned BN : WorkList) {
+      MachineBasicBlock *MBB = MF->getBlockNumbered(BN);
       SlotIndex Start, End;
-      std::tie(Start, End) = Indexes->getMBBRange(BN);
+      std::tie(Start, End) = Indexes->getMBBRange(MBB);
       // Trim the live range in UseMBB.
       if (BN == UseMBBNum && Use.isValid())
         End = Use;
       else
-        Map[MF->getBlockNumbered(BN)] = LiveOutPair(TheVNI, nullptr);
+        Map[MBB] = LiveOutPair(TheVNI, nullptr);
       Updater.add(Start, End, TheVNI);
     }
     return true;

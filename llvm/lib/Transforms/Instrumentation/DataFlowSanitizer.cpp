@@ -120,9 +120,9 @@
 using namespace llvm;
 
 // This must be consistent with ShadowWidthBits.
-static constexpr Align ShadowTLSAlignment = Align(2);
+static const Align ShadowTLSAlignment = Align(2);
 
-static constexpr Align MinOriginAlignment = Align(4);
+static const Align MinOriginAlignment = Align(4);
 
 // The size of TLS variables. These constants must be kept in sync with the ones
 // in dfsan.cpp.
@@ -3349,8 +3349,8 @@ void DFSanVisitor::visitCallBase(CallBase &CB) {
   if (F == DFSF.DFS.DFSanVarargWrapperFn.getCallee()->stripPointerCasts())
     return;
 
-  LibFunc LF;
-  if (DFSF.TLI.getLibFunc(CB, LF)) {
+  LibFunc LF = DFSF.TLI.getLibFunc(CB);
+  if (LF != NotLibFunc) {
     // libatomic.a functions need to have special handling because there isn't
     // a good way to intercept them or compile the library with
     // instrumentation.
