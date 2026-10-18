@@ -37,6 +37,7 @@ We aim to dynamically detect the following ABI violations:
 
 Before anything can be done, a first pass is made over the input source code to determine which symbols correspond to functions that should be instrumented.
 Currently, a symbol is selected for instrumentation only if it is
+
 0. declared global, and
 1. contains instructions.
 
