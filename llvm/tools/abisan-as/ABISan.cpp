@@ -73,6 +73,9 @@ static cl::opt<bool> Ignored3("v", cl::Hidden, cl::desc("Ignored"),
 static cl::opt<bool> Ignored4("g", cl::Hidden, cl::desc("Ignored"),
                               cl::cat(ABISanCat));
 
+static cl::opt<bool> Ignored5("fatal-warnings", cl::Hidden, cl::desc("Ignored"),
+                              cl::cat(ABISanCat));
+
 static cl::list<std::string> IncludeDirs("I",
                                          cl::desc("Directory of include files"),
                                          cl::value_desc("directory"),
@@ -243,7 +246,7 @@ int main(int argc, char const **argv) {
   SM->setIncludeDirs(IncludeDirs);
   SM->setVirtualFileSystem(vfs::getRealFileSystem());
 
-  MCContext FPCtx(TheTriple, MAI.get(), MRI.get(), STI.get(), SM.get());
+  MCContext FPCtx(TheTriple, *MAI.get(), *MRI.get(), *STI.get(), SM.get());
   std::unique_ptr<MCObjectFileInfo> FPMOFI =
       std::make_unique<MCObjectFileInfo>();
   FPMOFI->initMCObjectFileInfo(FPCtx, false);
@@ -268,7 +271,7 @@ int main(int argc, char const **argv) {
   std::unique_ptr<MCAsmParser> FPParser(
       createMCAsmParser(*SM.get(), FPCtx, FPStreamer, *MAI));
   std::unique_ptr<MCTargetAsmParser> FPTargetParser(
-      Target->createMCAsmParser(*STI, *FPParser, *MCII, Options));
+      Target->createMCAsmParser(*STI, *FPParser, *MCII));
   if (!FPTargetParser) {
     errs() << "No target-specific asm parser for triple!\n";
     exit(1);
@@ -282,7 +285,7 @@ int main(int argc, char const **argv) {
   // Second pass starts here.
   // This is where the instrumentation actually happens.
 
-  MCContext Ctx(TheTriple, MAI.get(), MRI.get(), STI.get(), SM.get());
+  MCContext Ctx(TheTriple, *MAI.get(), *MRI.get(), *STI.get(), SM.get());
   std::unique_ptr<MCObjectFileInfo> MOFI = std::make_unique<MCObjectFileInfo>();
   MOFI->initMCObjectFileInfo(Ctx, false);
   Ctx.setObjectFileInfo(MOFI.get());
@@ -304,7 +307,7 @@ int main(int argc, char const **argv) {
   std::unique_ptr<MCAsmParser> Parser(
       createMCAsmParser(*SM.get(), Ctx, Streamer, *MAI));
   std::unique_ptr<MCTargetAsmParser> TargetParser(
-      Target->createMCAsmParser(*STI, *Parser, *MCII, Options));
+      Target->createMCAsmParser(*STI, *Parser, *MCII));
   if (!TargetParser) {
     errs() << "No target-specific asm parser for triple!\n";
     exit(1);
