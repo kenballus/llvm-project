@@ -1,14 +1,17 @@
 # ABI Sanitizer
 
 ABI Sanitizer (ABISan) is an experimental tool for
+
 0. statically analyzing assembly source code (and not machine code) for ABI violations, and
 1. instrumenting assembly source code to check for such ABI violations at runtime.
 
 We aim to statically detect the following ABI violations:
+
 0. Register clobbering (sound, incomplete)
 1. Use of clobbered registers (sound, incomplete)
 
 We aim to dynamically detect the following ABI violations:
+
 0. Register clobbering (sound, complete)
 1. Use of clobbered registers (sound, complete)
 2. Stack misalignment (sound, complete)
@@ -34,6 +37,7 @@ We aim to dynamically detect the following ABI violations:
 
 Before anything can be done, a first pass is made over the input source code to determine which symbols correspond to functions that should be instrumented.
 Currently, a symbol is selected for instrumentation only if it is
+
 0. declared global, and
 1. contains instructions.
 
